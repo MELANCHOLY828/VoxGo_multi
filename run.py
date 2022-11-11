@@ -21,7 +21,7 @@ def config_parser():
     '''
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--config', type=str, default='/data1/liufengyi/mycode/DirectVoxGO/configs/llff/fern.py',
+    parser.add_argument('--config', type=str, default='/data1/liufengyi/mycode/DirectVoxGO/configs/nerf/lego.py',
                         help='config file path')
     parser.add_argument("--seed", type=int, default=777,
                         help='Random seed')
@@ -584,7 +584,7 @@ if __name__=='__main__':
         # init enviroment
         if torch.cuda.is_available():    #yes
             torch.set_default_tensor_type('torch.cuda.FloatTensor')
-            device = torch.device('cuda:3')
+            device = torch.device('cuda:0')
         else:
             device = torch.device('cpu')
         seed_everything()
