@@ -15,7 +15,7 @@ def load_data(args):
     K, depths = None, None
     near_clip = None
 
-    if args.dataset_type == 'llff':
+    if args.dataset_type == 'llff':   #yes
         images, depths, poses, bds, render_poses, i_test = load_llff_data(
                 args.datadir, args.factor, args.width, args.height,
                 recenter=True, bd_factor=args.bd_factor,
@@ -25,10 +25,10 @@ def load_data(args):
         hwf = poses[0,:3,-1]
         poses = poses[:,:3,:4]
         print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
-        if not isinstance(i_test, list):
+        if not isinstance(i_test, list):  #yes
             i_test = [i_test]
 
-        if args.llffhold > 0:
+        if args.llffhold > 0:   #yes
             print('Auto LLFF holdout,', args.llffhold)
             i_test = np.arange(images.shape[0])[::args.llffhold]
 
@@ -37,7 +37,7 @@ def load_data(args):
                         (i not in i_test and i not in i_val)])
 
         print('DEFINING BOUNDS')
-        if args.ndc:
+        if args.ndc:   #yes
             near = 0.
             far = 1.
         else:

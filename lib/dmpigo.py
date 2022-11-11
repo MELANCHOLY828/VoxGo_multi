@@ -15,7 +15,8 @@ from .dvgo import Raw2Alpha, Alphas2Weights, render_utils_cuda
 
 
 '''Model'''
-class DirectMPIGO(torch.nn.Module):
+#
+class DirectMPIGO(torch.nn.Module):    
     def __init__(self, xyz_min, xyz_max,
                  num_voxels=0, mpi_depth=0,
                  mask_cache_path=None, mask_cache_thres=1e-3, mask_cache_world_size=None,
@@ -27,23 +28,25 @@ class DirectMPIGO(torch.nn.Module):
                  viewbase_pe=0,
                  **kwargs):
         super(DirectMPIGO, self).__init__()
-        self.register_buffer('xyz_min', torch.Tensor(xyz_min))
+        #该组参数在模型训练时不会更新（即调用optimizer.step()后该组参数不会变化，只可人为地改变它们的值），但是该组参数又作为模型参数不可或缺的一部分
+        self.register_buffer('xyz_min', torch.Tensor(xyz_min))    
         self.register_buffer('xyz_max', torch.Tensor(xyz_max))
-        self.fast_color_thres = fast_color_thres
+        self.fast_color_thres = fast_color_thres   #0.001
 
-        # determine init grid resolution
+        # determine init grid resolution    网格体素数量 空间大小  得到网格分辨率
         self._set_grid_resolution(num_voxels, mpi_depth)
 
         # init density voxel grid
         self.density_type = density_type
         self.density_config = density_config
         self.density = grid.create_grid(
-                density_type, channels=1, world_size=self.world_size,
+                density_type, channels=1, world_size=self.world_size,   #[ 93,  88, 128]
                 xyz_min=self.xyz_min, xyz_max=self.xyz_max,
-                config=self.density_config)
+                config=self.density_config)     #DenseGrid(channels=1, world_size=[372, 352, 128])
 
         # init density bias so that the initial contribution (the alpha values)
-        # of each query points on a ray is equal
+        # of each query points on a ray is equal   
+        # 初始密度偏差，以便射线上每个查询点的初始贡献（alpha 值）相等
         self.act_shift = grid.DenseGrid(
                 channels=1, world_size=[1,1,mpi_depth],
                 xyz_min=xyz_min, xyz_max=xyz_max)
@@ -59,13 +62,13 @@ class DirectMPIGO(torch.nn.Module):
         # init color representation
         # feature voxel grid + shallow MLP  (fine stage)
         self.rgbnet_kwargs = {
-            'rgbnet_dim': rgbnet_dim,
-            'rgbnet_depth': rgbnet_depth, 'rgbnet_width': rgbnet_width,
-            'viewbase_pe': viewbase_pe,
+            'rgbnet_dim': rgbnet_dim,   #9
+            'rgbnet_depth': rgbnet_depth, 'rgbnet_width': rgbnet_width,   #3 ， 64
+            'viewbase_pe': viewbase_pe,   #0
         }
-        self.k0_type = k0_type
+        self.k0_type = k0_type   #DenseGrid
         self.k0_config = k0_config
-        if rgbnet_dim <= 0:
+        if rgbnet_dim <= 0:   #no
             # color voxel grid  (coarse stage)
             self.k0_dim = 3
             self.k0 = grid.create_grid(
@@ -73,14 +76,14 @@ class DirectMPIGO(torch.nn.Module):
                 xyz_min=self.xyz_min, xyz_max=self.xyz_max,
                 config=self.k0_config)
             self.rgbnet = None
-        else:
+        else:   #yes
             self.k0_dim = rgbnet_dim
             self.k0 = grid.create_grid(
                     k0_type, channels=self.k0_dim, world_size=self.world_size,
                     xyz_min=self.xyz_min, xyz_max=self.xyz_max,
-                    config=self.k0_config)
+                    config=self.k0_config)    #DenseGrid(channels=9, world_size=[93, 88, 128])
             self.register_buffer('viewfreq', torch.FloatTensor([(2**i) for i in range(viewbase_pe)]))
-            dim0 = (3+3*viewbase_pe*2) + self.k0_dim
+            dim0 = (3+3*viewbase_pe*2) + self.k0_dim   #3+9
             self.rgbnet = nn.Sequential(
                 nn.Linear(dim0, rgbnet_width), nn.ReLU(inplace=True),
                 *[
@@ -88,8 +91,8 @@ class DirectMPIGO(torch.nn.Module):
                     for _ in range(rgbnet_depth-2)
                 ],
                 nn.Linear(rgbnet_width, 3),
-            )
-            nn.init.constant_(self.rgbnet[-1].bias, 0)
+            )       #3层MLP网络 12-64  64-64   64-3
+            nn.init.constant_(self.rgbnet[-1].bias, 0)   #bias初始化为0
 
         print('dmpigo: densitye grid', self.density)
         print('dmpigo: feature grid', self.k0)
@@ -99,9 +102,9 @@ class DirectMPIGO(torch.nn.Module):
         # Re-implement as occupancy grid (2021/1/31)
         self.mask_cache_path = mask_cache_path
         self.mask_cache_thres = mask_cache_thres
-        if mask_cache_world_size is None:
-            mask_cache_world_size = self.world_size
-        if mask_cache_path is not None and mask_cache_path:
+        if mask_cache_world_size is None:   #yes
+            mask_cache_world_size = self.world_size   #[93, 88, 128]
+        if mask_cache_path is not None and mask_cache_path:   #no
             mask_cache = grid.MaskGrid(
                     path=mask_cache_path,
                     mask_cache_thres=mask_cache_thres).to(self.xyz_min.device)
@@ -111,8 +114,8 @@ class DirectMPIGO(torch.nn.Module):
                 torch.linspace(self.xyz_min[2], self.xyz_max[2], mask_cache_world_size[2]),
             ), -1)
             mask = mask_cache(self_grid_xyz)
-        else:
-            mask = torch.ones(list(mask_cache_world_size), dtype=torch.bool)
+        else:   #yes
+            mask = torch.ones(list(mask_cache_world_size), dtype=torch.bool)   #[93, 88, 128]
         self.mask_cache = grid.MaskGrid(
                 path=None, mask=mask,
                 xyz_min=self.xyz_min, xyz_max=self.xyz_max)
@@ -265,23 +268,23 @@ class DirectMPIGO(torch.nn.Module):
         interval = render_kwargs['stepsize'] * self.voxel_size_ratio
 
         # skip known free space
-        if self.mask_cache is not None:
-            mask = self.mask_cache(ray_pts)
+        if self.mask_cache is not None:   #yes
+            mask = self.mask_cache(ray_pts)    #这个函数里面也有cuda算子
             ray_pts = ray_pts[mask]
             ray_id = ray_id[mask]
             step_id = step_id[mask]
 
         # query for alpha w/ post-activation
         density = self.density(ray_pts) + self.act_shift(ray_pts)
-        alpha = self.activate_density(density, interval)
-        if self.fast_color_thres > 0:
+        alpha = self.activate_density(density, interval)   #用到了cuda算子
+        if self.fast_color_thres > 0:   #yes
             mask = (alpha > self.fast_color_thres)
             ray_pts = ray_pts[mask]
             ray_id = ray_id[mask]
             step_id = step_id[mask]
             alpha = alpha[mask]
 
-        # compute accumulated transmittance
+        # compute accumulated transmittance   weights就是T*alpha
         weights, alphainv_last = Alphas2Weights.apply(alpha, ray_id, N)
         if self.fast_color_thres > 0:
             mask = (weights > self.fast_color_thres)

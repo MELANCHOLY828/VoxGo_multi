@@ -50,6 +50,7 @@ class DenseGrid(nn.Module):
         '''
         shape = xyz.shape[:-1]
         xyz = xyz.reshape(1,1,1,-1,3)
+        #归一化
         ind_norm = ((xyz - self.xyz_min) / (self.xyz_max - self.xyz_min)).flip((-1,)) * 2 - 1
         out = F.grid_sample(self.grid, ind_norm, mode='bilinear', align_corners=True)
         out = out.reshape(self.channels,-1).T.reshape(*shape,self.channels)
@@ -204,7 +205,7 @@ It supports query for the known free space and unknown space.
 class MaskGrid(nn.Module):
     def __init__(self, path=None, mask_cache_thres=None, mask=None, xyz_min=None, xyz_max=None):
         super(MaskGrid, self).__init__()
-        if path is not None:
+        if path is not None:    #no
             st = torch.load(path)
             self.mask_cache_thres = mask_cache_thres
             density = F.max_pool3d(st['model_state_dict']['density.grid'], kernel_size=3, padding=1, stride=1)
@@ -212,14 +213,14 @@ class MaskGrid(nn.Module):
             mask = (alpha >= self.mask_cache_thres).squeeze(0).squeeze(0)
             xyz_min = torch.Tensor(st['model_kwargs']['xyz_min'])
             xyz_max = torch.Tensor(st['model_kwargs']['xyz_max'])
-        else:
+        else:   #yes
             mask = mask.bool()
             xyz_min = torch.Tensor(xyz_min)
             xyz_max = torch.Tensor(xyz_max)
 
         self.register_buffer('mask', mask)
         xyz_len = xyz_max - xyz_min
-        self.register_buffer('xyz2ijk_scale', (torch.Tensor(list(mask.shape)) - 1) / xyz_len)
+        self.register_buffer('xyz2ijk_scale', (torch.Tensor(list(mask.shape)) - 1) / xyz_len)   #一个长度有多少个网格
         self.register_buffer('xyz2ijk_shift', -xyz_min * self.xyz2ijk_scale)
 
     @torch.no_grad()

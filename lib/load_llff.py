@@ -31,13 +31,13 @@ def depthread(path):
 
 def _minify(basedir, factors=[], resolutions=[]):
     needtoload = False
-    for r in factors:
+    for r in factors:   #no
         imgdir = os.path.join(basedir, 'images_{}'.format(r))
         if not os.path.exists(imgdir):
             needtoload = True
-    for r in resolutions:
+    for r in resolutions:   #yes
         imgdir = os.path.join(basedir, 'images_{}x{}'.format(r[1], r[0]))
-        if not os.path.exists(imgdir):
+        if not os.path.exists(imgdir):   #yes
             needtoload = True
     if not needtoload:
         return
@@ -82,9 +82,9 @@ def _minify(basedir, factors=[], resolutions=[]):
 
 
 def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True, load_depths=False):
-
+    # basedir1 = '/data1/liufengyi/all_datasets/facebook/cook_spinach_img/resize_480*640_1/'
     poses_arr = np.load(os.path.join(basedir, 'poses_bounds.npy'))
-    if poses_arr.shape[1] == 17:
+    if poses_arr.shape[1] == 17:   #yes
         poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1,2,0])
     elif poses_arr.shape[1] == 14:
         poses = poses_arr[:, :-2].reshape([-1, 3, 4]).transpose([1,2,0])
@@ -98,7 +98,7 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True, lo
 
     sfx = ''
 
-    if height is not None and width is not None:
+    if height is not None and width is not None:   #yes
         _minify(basedir, resolutions=[[height, width]])
         sfx = '_{}x{}'.format(width, height)
     elif factor is not None and factor != 1:
@@ -125,7 +125,7 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True, lo
         return
 
     imgfiles = [os.path.join(imgdir, f) for f in sorted(os.listdir(imgdir)) if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')]
-    if poses.shape[-1] != len(imgfiles):
+    if poses.shape[-1] != len(imgfiles):   #no
         print()
         print( 'Mismatch between imgs {} and poses {} !!!!'.format(len(imgfiles), poses.shape[-1]) )
         names = set(name[:-4] for name in np.load(os.path.join(basedir, 'poses_names.npy')))
@@ -160,7 +160,7 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True, lo
 
     print('Loaded image data', imgs.shape, poses[:,-1,0])
 
-    if not load_depths:
+    if not load_depths:   #yes
         return poses, bds, imgs
 
     depthdir = os.path.join(basedir, 'stereo', 'depth_maps')
@@ -308,7 +308,7 @@ def load_llff_data(basedir, factor=8, width=None, height=None,
     print('Loaded', basedir, bds.min(), bds.max())
     if load_depths:
         depths = depths[0]
-    else:
+    else:   #yes
         depths = 0
 
     # Correct rotation matrix ordering and move variable dim to axis 0
@@ -319,7 +319,7 @@ def load_llff_data(basedir, factor=8, width=None, height=None,
     bds = np.moveaxis(bds, -1, 0).astype(np.float32)
 
     # Rescale if bd_factor is provided
-    if bds.min() < 0 and bd_factor is not None:
+    if bds.min() < 0 and bd_factor is not None:   #no
         print('Found negative z values from SfM sparse points!?')
         print('Please try bd_factor=None')
         import sys; sys.exit()
@@ -328,10 +328,10 @@ def load_llff_data(basedir, factor=8, width=None, height=None,
     bds *= sc
     depths *= sc
 
-    if recenter:
+    if recenter:   #yes
         poses = recenter_poses(poses)
 
-    if spherify:
+    if spherify:   #no
         poses, radius, bds, depths = spherify_poses(poses, bds, depths)
         if rerotate:
             poses = rerotate_poses(poses)
@@ -371,7 +371,7 @@ def load_llff_data(basedir, factor=8, width=None, height=None,
         render_poses = np.stack(render_poses, 0)
         render_poses = np.concatenate([render_poses, np.broadcast_to(poses[0,:3,-1:], render_poses[:,:3,-1:].shape)], -1)
 
-    else:
+    else:   #yes
 
         c2w = poses_avg(poses)
         print('recentered', c2w.shape)
@@ -395,7 +395,7 @@ def load_llff_data(basedir, factor=8, width=None, height=None,
         c2w_path = c2w
         N_views = 120
         N_rots = movie_render_kwargs.get('N_rots', 1)
-        if path_zflat:
+        if path_zflat:   #no
 #             zloc = np.percentile(tt, 10, 0)[2]
             zloc = -close_depth * .1
             c2w_path[:3,3] = c2w_path[:3,3] + zloc * c2w_path[:3,2]
