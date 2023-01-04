@@ -542,6 +542,7 @@ def train(args, cfg, data_dict):
 
     # coarse geometry searching (only works for inward bounded scenes)
     eps_coarse = time.time()
+    # blender数据集计算min和max时用的是归一化后的dir
     xyz_min_coarse, xyz_max_coarse = compute_bbox_by_cam_frustrm(args=args, cfg=cfg, **data_dict)
     if cfg.coarse_train.N_iters > 0:   #no
         scene_rep_reconstruction(
