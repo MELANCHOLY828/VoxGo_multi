@@ -1,0 +1,1 @@
+这个代码是debug好的，数据集为blender，对应环境为3090的VoxGo
