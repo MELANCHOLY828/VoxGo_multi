@@ -220,7 +220,7 @@ class MaskGrid(nn.Module):
 
         self.register_buffer('mask', mask)
         xyz_len = xyz_max - xyz_min
-        self.register_buffer('xyz2ijk_scale', (torch.Tensor(list(mask.shape)) - 1) / xyz_len)   #一个长度有多少个网格
+        self.register_buffer('xyz2ijk_scale', (torch.Tensor(list(mask.shape)) - 1) / xyz_len)   #一个长度有多少个网格,fine对应的也是coarse的数值
         self.register_buffer('xyz2ijk_shift', -xyz_min * self.xyz2ijk_scale)
 
     @torch.no_grad()

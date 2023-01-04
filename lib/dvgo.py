@@ -88,7 +88,7 @@ class DirectVoxGO(torch.nn.Module):
                     config=self.k0_config)
             self.rgbnet_direct = rgbnet_direct
             self.register_buffer('viewfreq', torch.FloatTensor([(2**i) for i in range(viewbase_pe)]))
-            dim0 = (3+3*viewbase_pe*2)
+            dim0 = (3+3*viewbase_pe*2)   #dir的位置编码
             if self.rgbnet_full_implicit:
                 pass
             elif rgbnet_direct:
@@ -109,11 +109,11 @@ class DirectVoxGO(torch.nn.Module):
 
         # Using the coarse geometry if provided (used to determine known free space and unknown space)
         # Re-implement as occupancy grid (2021/1/31)
-        self.mask_cache_path = mask_cache_path
+        self.mask_cache_path = mask_cache_path   #fine的时候存储的是coarse训练的模型
         self.mask_cache_thres = mask_cache_thres
         if mask_cache_world_size is None:
             mask_cache_world_size = self.world_size
-        if mask_cache_path is not None and mask_cache_path:
+        if mask_cache_path is not None and mask_cache_path:   #fine的时候yes
             mask_cache = grid.MaskGrid(
                     path=mask_cache_path,
                     mask_cache_thres=mask_cache_thres).to(self.xyz_min.device)
@@ -122,7 +122,7 @@ class DirectVoxGO(torch.nn.Module):
                 torch.linspace(self.xyz_min[1], self.xyz_max[1], mask_cache_world_size[1]),
                 torch.linspace(self.xyz_min[2], self.xyz_max[2], mask_cache_world_size[2]),
             ), -1)
-            mask = mask_cache(self_grid_xyz)
+            mask = mask_cache(self_grid_xyz)   #fine的mask根据coarse的mask得到
         else:
             mask = torch.ones(list(mask_cache_world_size), dtype=torch.bool)
         self.mask_cache = grid.MaskGrid(
@@ -310,7 +310,7 @@ class DirectVoxGO(torch.nn.Module):
 
         # skip known free space
         if self.mask_cache is not None:
-            mask = self.mask_cache(ray_pts)
+            mask = self.mask_cache(ray_pts)    #mask是[w,h,d],这一步主要是找到采样点对应的mask
             ray_pts = ray_pts[mask]
             ray_id = ray_id[mask]
             step_id = step_id[mask]
@@ -318,11 +318,11 @@ class DirectVoxGO(torch.nn.Module):
         # query for alpha w/ post-activation
         density = self.density(ray_pts)
         alpha = self.activate_density(density, interval)
-        if self.fast_color_thres > 0:
+        if self.fast_color_thres > 0:  #yes
             mask = (alpha > self.fast_color_thres)
             ray_pts = ray_pts[mask]
-            ray_id = ray_id[mask]
-            step_id = step_id[mask]
+            ray_id = ray_id[mask]   #rays的标号
+            step_id = step_id[mask] #一条光线上深度的标号
             density = density[mask]
             alpha = alpha[mask]
 

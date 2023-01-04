@@ -62,7 +62,7 @@ def config_parser():
 def render_viewpoints(model, render_poses, HW, Ks, ndc, render_kwargs,
                       gt_imgs=None, savedir=None, dump_images=False,
                       render_factor=0, render_video_flipy=False, render_video_rot90=0,
-                      eval_ssim=False, eval_lpips_alex=False, eval_lpips_vgg=False):
+                      eval_ssim=False, eval_lpips_alex=False, eval_lpips_vgg=False, testsavedir = 0):
     '''Render images for the given viewpoints; run evaluation if gt given.
     '''
     assert len(render_poses) == len(HW) and len(HW) == len(Ks)
@@ -102,6 +102,7 @@ def render_viewpoints(model, render_poses, HW, Ks, ndc, render_kwargs,
             for k in render_result_chunks[0].keys()
         }
         rgb = render_result['rgb_marched'].cpu().numpy()
+        # imageio.imwrite(os.path.join(testsavedir, f'rgb_{i}.png'), utils.to8b(rgb))
         depth = render_result['depth'].cpu().numpy()
         bgmap = render_result['alphainv_last'].cpu().numpy()
 
@@ -123,6 +124,11 @@ def render_viewpoints(model, render_poses, HW, Ks, ndc, render_kwargs,
 
     if len(psnrs):
         print('Testing psnr', np.mean(psnrs), '(avg)')
+        import json       
+        filename='PSNR.json'
+        with open("/data1/liufengyi/get_results/VoxGo/logs/nerf_synthetic/dvgo_lego/render_test_fine_last/"+filename,'w') as file_obj:
+            json.dump(psnrs,file_obj)
+        
         if eval_ssim: print('Testing ssim', np.mean(ssims), '(avg)')
         if eval_lpips_vgg: print('Testing lpips (vgg)', np.mean(lpips_vgg), '(avg)')
         if eval_lpips_alex: print('Testing lpips (alex)', np.mean(lpips_alex), '(avg)')
@@ -138,7 +144,7 @@ def render_viewpoints(model, render_poses, HW, Ks, ndc, render_kwargs,
             rgbs[i] = np.rot90(rgbs[i], k=render_video_rot90, axes=(0,1))
             depths[i] = np.rot90(depths[i], k=render_video_rot90, axes=(0,1))
             bgmaps[i] = np.rot90(bgmaps[i], k=render_video_rot90, axes=(0,1))
-
+    dump_images = True  #保存图片
     if savedir is not None and dump_images:
         for i in trange(len(rgbs)):
             rgb8 = utils.to8b(rgbs[i])
@@ -300,8 +306,8 @@ def load_existed_model(args, cfg, cfg_train, reload_ckpt_path):
 
 def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, data_dict, stage, coarse_ckpt_path=None):
     # init
-    device = torch.device('cuda:3' if torch.cuda.is_available() else 'cpu')
-    if abs(cfg_model.world_bound_scale - 1) > 1e-9:   #no   为0
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if abs(cfg_model.world_bound_scale - 1) > 1e-9:   #coarse为no,fine为yes
         xyz_shift = (xyz_max - xyz_min) * (cfg_model.world_bound_scale - 1) / 2
         xyz_min -= xyz_shift
         xyz_max += xyz_shift
@@ -327,7 +333,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         print(f'scene_rep_reconstruction ({stage}): train from scratch')
         model, optimizer = create_new_model(cfg, cfg_model, cfg_train, xyz_min, xyz_max, stage, coarse_ckpt_path)
         start = 0
-        if cfg_model.maskout_near_cam_vox:   #no
+        if cfg_model.maskout_near_cam_vox:   #coarse:yes;fine:no
             model.maskout_near_cam_vox(poses[i_train,:3,3], near)
     else:    #第一次训练完 就有预训练的模型啦
         print(f'scene_rep_reconstruction ({stage}): reload from {reload_ckpt_path}')
@@ -347,7 +353,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
 
     # init batch rays sampler
     def gather_training_rays():
-        if data_dict['irregular_shape']:      #no
+        if data_dict['irregular_shape']:      #把img放在gpu上面
             rgb_tr_ori = [images[i].to('cpu' if cfg.data.load2gpu_on_the_fly else device) for i in i_train]
         else:       #yes
             rgb_tr_ori = images[i_train].to('cpu' if cfg.data.load2gpu_on_the_fly else device)
@@ -378,7 +384,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
 
     rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz, batch_index_sampler = gather_training_rays()
 
-    # view-count-based learning rate
+    # view-count-based learning rate   基于观看次数的学习率 (论文里面有提到)
     if cfg_train.pervoxel_lr:   #no
         def per_voxel_init():
             cnt = model.voxel_count_views(
@@ -405,18 +411,18 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         #     model.update_occupancy_cache()
 
         # progress scaling checkpoint
-        # if global_step in cfg_train.pg_scale:   #[2000, 4000, 6000, 8000]
-        #     n_rest_scales = len(cfg_train.pg_scale)-cfg_train.pg_scale.index(global_step)-1
-        #     cur_voxels = int(cfg_model.num_voxels / (2**n_rest_scales))
-        #     if isinstance(model, (dvgo.DirectVoxGO, dcvgo.DirectContractedVoxGO)):
-        #         model.scale_volume_grid(cur_voxels)
-        #     elif isinstance(model, dmpigo.DirectMPIGO):
-        #         model.scale_volume_grid(cur_voxels, model.mpi_depth)
-        #     else:
-        #         raise NotImplementedError
-        #     optimizer = utils.create_optimizer_or_freeze_model(model, cfg_train, global_step=0)
-        #     model.act_shift -= cfg_train.decay_after_scale
-        #     torch.cuda.empty_cache()
+        if global_step in cfg_train.pg_scale:   #[2000, 4000, 6000, 8000]
+            n_rest_scales = len(cfg_train.pg_scale)-cfg_train.pg_scale.index(global_step)-1
+            cur_voxels = int(cfg_model.num_voxels / (2**n_rest_scales))
+            if isinstance(model, (dvgo.DirectVoxGO, dcvgo.DirectContractedVoxGO)):
+                model.scale_volume_grid(cur_voxels)
+            elif isinstance(model, dmpigo.DirectMPIGO):
+                model.scale_volume_grid(cur_voxels, model.mpi_depth)
+            else:
+                raise NotImplementedError
+            optimizer = utils.create_optimizer_or_freeze_model(model, cfg_train, global_step=0)
+            model.act_shift -= cfg_train.decay_after_scale
+            torch.cuda.empty_cache()
 
         # random sample rays
         if cfg_train.ray_sampler in ['flatten', 'in_maskcache']:
@@ -463,7 +469,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             if len(density):
                 nearclip_loss = (density - density.detach()).sum()
                 loss += cfg_train.weight_nearclip * nearclip_loss
-        if cfg_train.weight_distortion > 0:   #yes
+        if cfg_train.weight_distortion > 0:   #no
             n_max = render_result['n_max']
             s = render_result['s']
             w = render_result['weights']
@@ -670,7 +676,7 @@ if __name__=='__main__':
                     Ks=data_dict['Ks'][data_dict['i_train']],
                     gt_imgs=[data_dict['images'][i].cpu().numpy() for i in data_dict['i_train']],
                     savedir=testsavedir, dump_images=args.dump_images,
-                    eval_ssim=args.eval_ssim, eval_lpips_alex=args.eval_lpips_alex, eval_lpips_vgg=args.eval_lpips_vgg,
+                    eval_ssim=args.eval_ssim, eval_lpips_alex=args.eval_lpips_alex, eval_lpips_vgg=args.eval_lpips_vgg, testsavedir = testsavedir,
                     **render_viewpoints_kwargs)
             imageio.mimwrite(os.path.join(testsavedir, 'video.rgb.mp4'), utils.to8b(rgbs), fps=30, quality=8)
             imageio.mimwrite(os.path.join(testsavedir, 'video.depth.mp4'), utils.to8b(1 - depths / np.max(depths)), fps=30, quality=8)
