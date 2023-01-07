@@ -21,7 +21,7 @@ def config_parser():
     '''
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--config', type=str, default='/data1/liufengyi/mycode/DirectVoxGO/configs/nerf/lego.py',
+    parser.add_argument('--config', type=str, default='/data/liufengyi/MyCode/VoxGo_rewrite/configs/nerf/lego.py',
                         help='config file path')
     parser.add_argument("--seed", type=int, default=777,
                         help='Random seed')
@@ -126,7 +126,7 @@ def render_viewpoints(model, render_poses, HW, Ks, ndc, render_kwargs,
         print('Testing psnr', np.mean(psnrs), '(avg)')
         import json       
         filename='PSNR.json'
-        with open("/data1/liufengyi/get_results/VoxGo/logs/nerf_synthetic/dvgo_lego/render_test_fine_last/"+filename,'w') as file_obj:
+        with open("/data/liufengyi/Results/VoxGo_rewrite/lego/render_test_fine_last/"+filename,'w') as file_obj:
             json.dump(psnrs,file_obj)
         
         if eval_ssim: print('Testing ssim', np.mean(ssims), '(avg)')

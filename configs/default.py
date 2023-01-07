@@ -43,6 +43,10 @@ coarse_train = dict(
     N_rand=8192,                  # batch size (number of random rays per optimization step)
     lrate_density=1e-1,           # lr of density voxel grid
     lrate_k0=1e-1,                # lr of color/feature voxel grid
+    
+    lrate_hash=1e-1,
+    lrate_mlpnet=1e-3, 
+    
     lrate_rgbnet=1e-3,            # lr of the mlp to preduct view-dependent color
     lrate_decay=20,               # lr decay by 0.1 after every lrate_decay*1000 steps
     pervoxel_lr=True,             # view-count-based lr
@@ -81,10 +85,19 @@ fine_train.update(dict(
 coarse_model_and_render = dict(
     num_voxels=1024000,           # expected number of voxel
     num_voxels_base=1024000,      # to rescale delta distance
+    
+    hash_channel = 28,
+    hidden_features = 128,
+    hidden_layers = 2,
+    out_features = 28,
+    use_fine = False, 
+    
+    hash_type='DenseGrid',        #Add
     density_type='DenseGrid',     # DenseGrid, TensoRFGrid
     k0_type='DenseGrid',          # DenseGrid, TensoRFGrid
+    hash_config=dict(),           #Add
     density_config=dict(),
-    k0_config=dict(),
+    k0_config=dict(), 
     mpi_depth=128,                # the number of planes in Multiplane Image (work when ndc=True)
     nearest=False,                # nearest interpolation
     pre_act_density=False,        # pre-activated trilinear interpolation
@@ -105,6 +118,7 @@ coarse_model_and_render = dict(
 
 fine_model_and_render = deepcopy(coarse_model_and_render)
 fine_model_and_render.update(dict(
+    use_fine = True, 
     num_voxels=160**3,
     num_voxels_base=160**3,
     rgbnet_dim=12,

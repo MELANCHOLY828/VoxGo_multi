@@ -16,12 +16,12 @@ render_utils_cuda = load(
             for path in ['cuda/render_utils.cpp', 'cuda/render_utils_kernel.cu']],
         verbose=True)
 
-total_variation_cuda = load(
-        name='total_variation_cuda',
-        sources=[
-            os.path.join(parent_dir, path)
-            for path in ['cuda/total_variation.cpp', 'cuda/total_variation_kernel.cu']],
-        verbose=True)
+# total_variation_cuda = load(
+#         name='total_variation_cuda',
+#         sources=[
+#             os.path.join(parent_dir, path)
+#             for path in ['cuda/total_variation.cpp', 'cuda/total_variation_kernel.cu']],
+#         verbose=True)
 
 
 def create_grid(type, **kwargs):
@@ -36,14 +36,27 @@ def create_grid(type, **kwargs):
 ''' Dense 3D grid
 '''
 class DenseGrid(nn.Module):
-    def __init__(self, channels, world_size, xyz_min, xyz_max, **kwargs):
+    def __init__(self, channels, world_size, xyz_min, xyz_max, use_fine=None, hidden_features=None, hidden_layers=None, out_features=None, **kwargs):
         super(DenseGrid, self).__init__()
         self.channels = channels
         self.world_size = world_size
+        self.use_fine = use_fine
         self.register_buffer('xyz_min', torch.Tensor(xyz_min))
         self.register_buffer('xyz_max', torch.Tensor(xyz_max))
-        self.grid = nn.Parameter(torch.zeros([1, channels, *world_size]))
-
+        if self.use_fine:
+            self.grid = torch.nn.Parameter(1e-4 * (torch.rand((1, channels, *world_size))*2 -1),requires_grad = True)
+        else:
+            self.grid = nn.Parameter(torch.zeros([1, channels, *world_size]))
+        # if self.use_fine:
+        #     self.mlpnet = nn.Sequential(
+        #             nn.Linear(channels, hidden_features), nn.ReLU(inplace=True),
+        #             *[
+        #                 nn.Sequential(nn.Linear(hidden_features, hidden_features), nn.ReLU(inplace=True))
+        #                 for _ in range(hidden_layers)
+        #             ],
+        #             nn.Linear(hidden_features, out_features),
+        #         )
+        # nn.init.constant_(self.mlpnet[-1].bias, 0)
     def forward(self, xyz):
         '''
         xyz: global coordinates to query
@@ -56,6 +69,8 @@ class DenseGrid(nn.Module):
         out = out.reshape(self.channels,-1).T.reshape(*shape,self.channels)
         if self.channels == 1:
             out = out.squeeze(-1)
+        # if self.use_fine:
+        #     out = self.mlpnet(out)
         return out
 
     def scale_volume_grid(self, new_world_size):

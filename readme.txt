@@ -1,1 +1,2 @@
-这个代码是debug好的，数据集为blender，对应环境为3090的VoxGo
+数据集为blender，对应环境为3090的VoxGo
+修改后的代码,可以运行成功
