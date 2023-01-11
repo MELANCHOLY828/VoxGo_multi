@@ -43,10 +43,10 @@ class DenseGrid(nn.Module):
         self.use_fine = use_fine
         self.register_buffer('xyz_min', torch.Tensor(xyz_min))
         self.register_buffer('xyz_max', torch.Tensor(xyz_max))
-        if self.use_fine:
-            self.grid = torch.nn.Parameter(1e-4 * (torch.rand((1, channels, *world_size))*2 -1),requires_grad = True)
-        else:
-            self.grid = nn.Parameter(torch.zeros([1, channels, *world_size]))
+        # if self.use_fine:
+        #     self.grid = torch.nn.Parameter(1e-4 * (torch.rand((1, channels, *world_size))*2 -1),requires_grad = True)
+        # else:
+        self.grid = nn.Parameter(torch.zeros([1, channels, *world_size]))
         # if self.use_fine:
         #     self.mlpnet = nn.Sequential(
         #             nn.Linear(channels, hidden_features), nn.ReLU(inplace=True),

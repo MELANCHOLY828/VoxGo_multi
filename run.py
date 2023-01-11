@@ -11,11 +11,22 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from lib import utils, dvgo, dcvgo, dmpigo
+# from lib import utils, dvgo
+
 from lib.load_data import load_data
 
 from torch_efficient_distloss import flatten_eff_distloss
 os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# 写入json文件
+def write_json_data(path, params):
+    # 使用写模式，名称定义为r
+    #其中路径如果和读json方法中的名称不一致，会重新创建一个名称为该方法中写的文件名
+    json_str=json.dumps(params,indent=4,ensure_ascii=False)
+    with open(path+'/record.json', 'w', encoding='utf-8') as json_file:
+        # 将dict写入名称为r的文件中
+        json_file.write(json_str)
+        
 def config_parser():
     '''Define command line arguments
     '''
@@ -124,10 +135,11 @@ def render_viewpoints(model, render_poses, HW, Ks, ndc, render_kwargs,
 
     if len(psnrs):
         print('Testing psnr', np.mean(psnrs), '(avg)')
-        import json       
-        filename='PSNR.json'
-        with open("/data/liufengyi/Results/VoxGo_rewrite/lego/render_test_fine_last/"+filename,'w') as file_obj:
-            json.dump(psnrs,file_obj)
+        if savedir is not None:
+            import json       
+            filename='PSNR.json'
+            with open(savedir+'/'+filename,'w') as file_obj:
+                json.dump(psnrs,file_obj)
         
         if eval_ssim: print('Testing ssim', np.mean(ssims), '(avg)')
         if eval_lpips_vgg: print('Testing lpips (vgg)', np.mean(lpips_vgg), '(avg)')
@@ -295,7 +307,7 @@ def load_existed_model(args, cfg, cfg_train, reload_ckpt_path):
         model_class = dmpigo.DirectMPIGO
     elif cfg.data.unbounded_inward:
         model_class = dcvgo.DirectContractedVoxGO
-    else:
+    else: 
         model_class = dvgo.DirectVoxGO
     model = utils.load_model(model_class, reload_ckpt_path).to(device)
     optimizer = utils.create_optimizer_or_freeze_model(model, cfg_train, global_step=0)
@@ -519,6 +531,26 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             print(f'scene_rep_reconstruction ({stage}): saved checkpoints at', path)
 
     if global_step != -1:
+        save_ratio = False
+        if save_ratio:
+            ratio_path = os.path.join(cfg.basedir, cfg.expname, 'mask_ratio.xls')
+            import xlwt 
+            file = xlwt.Workbook('encoding = utf-8') 
+            sheet1 = file.add_sheet('sheet1',cell_overwrite_ok=True) 
+
+            # sheet1.write(a,b,c) 函数中参数a、b、c分别对应行数、列数、单元格内容
+            sheet1.write(0, 0, "序号") # 第1行第1列
+            sheet1.write(0, 1, "mask1") # 第1行第1列
+            sheet1.write(0, 2, "mask2") # 第1行第2列
+            sheet1.write(0, 3, "mask3") # 第1行第3列
+
+            for i in range(len(model.ratio1)):
+                sheet1.write(i + 1, 0, i)            # 第1列序号
+                sheet1.write(i + 1, 1, model.ratio1[i].item()) # 第2列数量
+                sheet1.write(i + 1, 2, model.ratio2[i].item())  # 第3列误差
+                sheet1.write(i + 1, 3, model.ratio3[i].item())  # 第3列误差
+            file.save(ratio_path) 
+        
         torch.save({
             'global_step': global_step,
             'model_kwargs': model.get_kwargs(),
@@ -596,6 +628,16 @@ if __name__=='__main__':
             device = torch.device('cpu')
         seed_everything()
 
+        import json
+        dirpath = cfg.basedir + '/' + cfg.expname
+        os.makedirs(dirpath,exist_ok=True)
+        record_code = {
+            'name' : cfg.expname,
+            'description' : "VoxGo代码修改,fine网格为160^3,上采样细分网络;mlp网络为1*128;对之前代码修改,尝试看能不能加快速度"
+        }
+        write_json_data(dirpath, record_code)
+        
+        
         # load images / poses / camera settings / data split
         data_dict = load_everything(args=args, cfg=cfg)
 

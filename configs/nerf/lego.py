@@ -1,6 +1,7 @@
 _base_ = '../default.py'
 
-expname = 'lego'
+# expname = 'lego_1*128_160_fast'
+expname = 'lego_debug'
 basedir = '/data/liufengyi/Results/VoxGo_rewrite'
 
 data = dict(

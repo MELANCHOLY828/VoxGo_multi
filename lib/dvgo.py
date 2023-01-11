@@ -38,14 +38,17 @@ class DirectVoxGO(torch.nn.Module):
                  hidden_features=128, hidden_layers = 2, out_features=28,
                  use_fine = True,
                  viewbase_pe=4,
+                 savepath = '/data/liufengyi/Results/VoxGo_rewrite',
                  **kwargs):
         super(DirectVoxGO, self).__init__()
         self.register_buffer('xyz_min', torch.Tensor(xyz_min))
         self.register_buffer('xyz_max', torch.Tensor(xyz_max))
         self.fast_color_thres = fast_color_thres
-        
+        self.savepath = savepath
         self.use_fine = use_fine
-        
+        self.ratio1 = []
+        self.ratio2 = []
+        self.ratio3 = []
         # determine based grid resolution
         self.num_voxels_base = num_voxels_base
         self.voxel_size_base = ((self.xyz_max - self.xyz_min).prod() / self.num_voxels_base).pow(1/3)
@@ -60,6 +63,7 @@ class DirectVoxGO(torch.nn.Module):
 
         if self.use_fine:
             # init hash voxel grid
+            self.hash_channel = hash_channel
             self.hash_type = hash_type
             self.hash_config = hash_config
             self.hidden_features = hidden_features
@@ -68,7 +72,7 @@ class DirectVoxGO(torch.nn.Module):
 
             
             self.hash = grid.create_grid(
-                    hash_type, channels=hash_channel, world_size=self.world_size,
+                    hash_type, channels=self.hash_channel, world_size=self.world_size,
                     xyz_min=self.xyz_min, xyz_max=self.xyz_max,
                     use_fine = self.use_fine,
                     hidden_features = self.hidden_features, 
@@ -84,9 +88,15 @@ class DirectVoxGO(torch.nn.Module):
                     ],
                     nn.Linear(hidden_features, out_features),
                 )
-            nn.init.constant_(self.mlpnet[-1].bias, 0)
+            load_mlp = False
+            if load_mlp:
+                print("loading mlp weights......")
+                path = "/data/liufengyi/Results/mlp.tar"
+                ckpt = torch.load(path)
+                self.mlpnet.load_state_dict(ckpt['model_state_dict'])
+            # nn.init.constant_(self.mlpnet[-1].bias, 0)
             print('dvgo: hash voxel grid', self.hash)
-        
+            print('dvgo: MLPNet structure', self.mlpnet)
                 
         else:
             # init density voxel grid
@@ -202,6 +212,10 @@ class DirectVoxGO(torch.nn.Module):
             # 'k0_config': self.k0_config,
             'hash_config' : self.hash_config,
             'use_fine' : self.use_fine,
+            'hash_channel' : self.hash_channel,
+            'hidden_features' : self.hidden_features,
+            'hidden_layers' : self.hidden_layers,
+            'out_features' : self.out_features,
             # **self.rgbnet_kwargs,
         }
         else:
@@ -259,15 +273,43 @@ class DirectVoxGO(torch.nn.Module):
                 torch.linspace(self.xyz_min[2], self.xyz_max[2], self.world_size[2]),
             ), -1)
             if self.use_fine:
+                # self.mask_cache = grid.MaskGrid(
+                #     path=None, mask=self.mask_cache(self_grid_xyz),
+                #     xyz_min=self.xyz_min, xyz_max=self.xyz_max)
+                
+                self_alpha = F.max_pool3d(self.activate_density(self.mlpnet(self.hash.get_dense_grid().squeeze().permute(1,2,3,0).reshape(-1,self.hash_channel))[:,0]).reshape(*self.hash.get_dense_grid()[:,0:1].shape), kernel_size=3, padding=1, stride=1)[0,0]
                 self.mask_cache = grid.MaskGrid(
-                    path=None, mask=self.mask_cache(self_grid_xyz),
-                    xyz_min=self.xyz_min, xyz_max=self.xyz_max)
+                        path=None, mask=self.mask_cache(self_grid_xyz) & (self_alpha>self.fast_color_thres),
+                        xyz_min=self.xyz_min, xyz_max=self.xyz_max)
             else:
                 self_alpha = F.max_pool3d(self.activate_density(self.density.get_dense_grid()), kernel_size=3, padding=1, stride=1)[0,0]
                 self.mask_cache = grid.MaskGrid(
                         path=None, mask=self.mask_cache(self_grid_xyz) & (self_alpha>self.fast_color_thres),
                         xyz_min=self.xyz_min, xyz_max=self.xyz_max)
+                
+        mask_sum = self.mask_cache.mask.sum()
+        ratio = self.mask_cache.mask.sum()/(self.mask_cache.mask.shape[0]*self.mask_cache.mask.shape[1]*self.mask_cache.mask.shape[2])
+        # 导入CSV模块
+        import csv
 
+        header = ['mask_sum', 'ratio']
+        data = [mask_sum.item(), ratio.item()]
+        if num_voxels == 160**3/8:
+            with open(f'{self.savepath}/file.csv', 'w', encoding='UTF8') as f:
+                writer = csv.writer(f)
+                # write the header
+                writer.writerow(header)
+                # write the data
+                writer.writerow(data)
+                f.close()
+        else:
+            with open(f'{self.savepath}/file.csv', 'a+', encoding='UTF8') as f:
+                writer = csv.writer(f)
+                writer.writerow(data)
+                f.close()
+
+        print('self.mask_cache.mask.sum():', mask_sum)
+        print('比例', ratio)
         print('dvgo: scale_volume_grid finish')
 
     @torch.no_grad()
@@ -382,21 +424,43 @@ class DirectVoxGO(torch.nn.Module):
                 rays_o=rays_o, rays_d=rays_d, **render_kwargs)
         interval = render_kwargs['stepsize'] * self.voxel_size_ratio
 
-        # skip known free space
+        #skip known free space
         if self.mask_cache is not None:
             mask = self.mask_cache(ray_pts)    #mask是[w,h,d],这一步主要是找到采样点对应的mask
             ray_pts = ray_pts[mask]
             ray_id = ray_id[mask]
             step_id = step_id[mask]
+            self.ratio1 += [mask.sum()/mask.shape[0]]
         if self.use_fine:
             #hashmlp
-            
             mlp_grid = self.hash(ray_pts)
             mlp_features = self.mlpnet(mlp_grid)
             density = mlp_features[:,0]
             sh_val = mlp_features[:,1:]
             alpha = self.activate_density(density, interval)
+            
+            if self.fast_color_thres > 0:  #yes
+                mask = (alpha > self.fast_color_thres)
+                ray_pts = ray_pts[mask]
+                ray_id = ray_id[mask]   #rays的标号
+                step_id = step_id[mask] #一条光线上深度的标号
+                density = density[mask]
+                alpha = alpha[mask]
+                sh_val = sh_val[mask]
+                self.ratio2 += [mask.sum()/mask.shape[0]]
+                
             weights, alphainv_last = Alphas2Weights.apply(alpha, ray_id, N)
+            
+            if self.fast_color_thres > 0:
+                mask = (weights > self.fast_color_thres)
+                weights = weights[mask]
+                alpha = alpha[mask]
+                ray_pts = ray_pts[mask]
+                ray_id = ray_id[mask]
+                step_id = step_id[mask]
+                sh_val = sh_val[mask]
+                self.ratio3 += [mask.sum()/mask.shape[0]]
+                
             sh_deg = 2
             
             viewdirs = viewdirs[ray_id]
@@ -498,7 +562,7 @@ class Raw2Alpha(torch.autograd.Function):
         if density.requires_grad:
             flag = True
         density = density.contiguous()
-        if flag:
+        if flag and density.requires_grad == False:
             density.requires_grad = True
         exp, alpha = render_utils_cuda.raw2alpha(density, shift, interval)
         if density.requires_grad:

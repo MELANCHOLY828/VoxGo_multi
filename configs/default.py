@@ -86,9 +86,9 @@ coarse_model_and_render = dict(
     num_voxels=1024000,           # expected number of voxel
     num_voxels_base=1024000,      # to rescale delta distance
     
-    hash_channel = 28,
-    hidden_features = 128,
-    hidden_layers = 2,
+    hash_channel = 48,
+    hidden_features = 64,
+    hidden_layers = 1,
     out_features = 28,
     use_fine = False, 
     
