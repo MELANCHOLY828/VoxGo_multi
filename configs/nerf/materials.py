@@ -1,11 +1,12 @@
 _base_ = '../default.py'
 
-expname = 'dvgo_materials'
-basedir = './logs/nerf_synthetic'
+expname = 'materials'
+basedir = '/data/liufengyi/Results/VoxGo_rewrite'
 
 data = dict(
-    datadir='./data/nerf_synthetic/materials',
+    datadir='/data/liufengyi/Datasets/nerf_synthetic/nerf_synthetic/materials/',
     dataset_type='blender',
     white_bkgd=True,
+    half_res=True, 
 )
 

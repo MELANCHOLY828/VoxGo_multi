@@ -1,7 +1,8 @@
 import os, sys, copy, glob, json, time, random, argparse
 from shutil import copyfile
 from tqdm import tqdm, trange
-
+import time
+import math
 import mmcv
 import imageio
 import numpy as np
@@ -18,6 +19,33 @@ from lib.load_data import load_data
 from torch_efficient_distloss import flatten_eff_distloss
 os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+class Logger:
+    filename = None
+    filename1 = None
+    filename2 = None
+    @staticmethod
+    def write(text):
+        with open(Logger.filename, 'a') as log_file:
+            print(text, flush=True)
+            log_file.write(text + '\n')
+
+    @staticmethod
+    def write_noprint(text):
+        with open(Logger.filename, 'a') as log_file:
+            log_file.write(text + '\n')
+    @staticmethod
+    def write1_noprint(text):
+        with open(Logger.filename1, 'a') as log_file:
+            log_file.write(text + '\n')
+    @staticmethod
+    def write2_noprint(text):
+        with open(Logger.filename2, 'a') as log_file:
+            log_file.write(text + '\n')
+            
+def mkdirs(path):
+    if not os.path.exists(path):
+            os.makedirs(path)
 # 写入json文件
 def write_json_data(path, params):
     # 使用写模式，名称定义为r
@@ -66,12 +94,15 @@ def config_parser():
                         help='frequency of console printout and metric loggin')
     parser.add_argument("--i_weights", type=int, default=100000,
                         help='frequency of weight ckpt saving')
+    # # log interval
+    # parser.add_argument("--log_interval",   type=int, default=5,
+    #                     help='每迭代n次记录')
     return parser
 
 
 @torch.no_grad()
 def render_viewpoints(model, render_poses, HW, Ks, ndc, render_kwargs,
-                      gt_imgs=None, savedir=None, dump_images=False,
+                      gt_imgs=None, savedir=None, psnr_dir=None, dump_images=False,
                       render_factor=0, render_video_flipy=False, render_video_rot90=0,
                       eval_ssim=False, eval_lpips_alex=False, eval_lpips_vgg=False, testsavedir = 0):
     '''Render images for the given viewpoints; run evaluation if gt given.
@@ -91,7 +122,14 @@ def render_viewpoints(model, render_poses, HW, Ks, ndc, render_kwargs,
     ssims = []
     lpips_alex = []
     lpips_vgg = []
-
+    
+    psnr_path = psnr_dir
+    ssim_path = psnr_dir
+    mkdirs(psnr_path)
+    mkdirs(ssim_path)
+    Logger.filename1 = os.path.join(psnr_path, 'psnr.txt') 
+    Logger.filename2 = os.path.join(ssim_path, 'ssim.txt') 
+    
     for i, c2w in enumerate(tqdm(render_poses)):
 
         H, W = HW[i]
@@ -124,22 +162,36 @@ def render_viewpoints(model, render_poses, HW, Ks, ndc, render_kwargs,
             print('Testing', rgb.shape)
 
         if gt_imgs is not None and render_factor==0:
-            p = -10. * np.log10(np.mean(np.square(rgb - gt_imgs[i])))
-            psnrs.append(p)
+            psnr = -10. * np.log10(np.mean(np.square(rgb - gt_imgs[i])))
+            psnr_str = f"PSNR: {psnr}"
+            Logger.write1_noprint(psnr_str)
+            psnrs.append(psnr)
+            eval_ssim = True
             if eval_ssim:
-                ssims.append(utils.rgb_ssim(rgb, gt_imgs[i], max_val=1))
+                ssim = utils.rgb_ssim(rgb, gt_imgs[i], max_val=1)
+                ssim_str = f"SSIM: {ssim}"
+                Logger.write2_noprint(ssim_str)
+                ssims.append(ssim)
             if eval_lpips_alex:
                 lpips_alex.append(utils.rgb_lpips(rgb, gt_imgs[i], net_name='alex', device=c2w.device))
             if eval_lpips_vgg:
                 lpips_vgg.append(utils.rgb_lpips(rgb, gt_imgs[i], net_name='vgg', device=c2w.device))
 
     if len(psnrs):
+        avg_psnr = np.mean(psnrs)
+        psnr_avg = f"avg_PSNR: {avg_psnr}"
+        Logger.write1_noprint(psnr_avg)
+        
+        avg_ssim = np.mean(ssims)
+        ssim_avg = f"avg_SSIM: {avg_ssim}"
+        Logger.write2_noprint(ssim_avg)
+        
         print('Testing psnr', np.mean(psnrs), '(avg)')
-        if savedir is not None:
-            import json       
-            filename='PSNR.json'
-            with open(savedir+'/'+filename,'w') as file_obj:
-                json.dump(psnrs,file_obj)
+        # if savedir is not None:
+        #     import json       
+        #     filename='PSNR.json'
+        #     with open(savedir+'/'+filename,'w') as file_obj:
+        #         json.dump(psnrs,file_obj)
         
         if eval_ssim: print('Testing ssim', np.mean(ssims), '(avg)')
         if eval_lpips_vgg: print('Testing lpips (vgg)', np.mean(lpips_vgg), '(avg)')
@@ -317,6 +369,9 @@ def load_existed_model(args, cfg, cfg_train, reload_ckpt_path):
 
 
 def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, data_dict, stage, coarse_ckpt_path=None):
+    cfg_ = {
+        'log_interval': 5,
+    }
     # init
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if abs(cfg_model.world_bound_scale - 1) > 1e-9:   #coarse为no,fine为yes
@@ -416,8 +471,16 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
     psnr_lst = []
     time0 = time.time()
     global_step = -1
+    total_time = 0
+    if stage == 'fine':
+        ## Create log dirs
+        log_dir = os.path.join(cfg.basedir, cfg.expname)
+        mkdirs(log_dir)
+        Logger.filename = os.path.join(log_dir, 'log.txt') 
+        Logger.write_noprint(f'log_dir: {log_dir}')
     for global_step in trange(1+start, 1+cfg_train.N_iters):   #0 30000
-
+        time_start = time.time()
+        
         # renew occupancy grid
         # if model.mask_cache is not None and (global_step + 500) % 1000 == 0:
         #     model.update_occupancy_cache()
@@ -470,6 +533,10 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         optimizer.zero_grad(set_to_none=True)
         loss = cfg_train.weight_main * F.mse_loss(render_result['rgb_marched'], target)
         psnr = utils.mse2psnr(loss.detach())
+        
+        
+        
+            
         if cfg_train.weight_entropy_last > 0:   #yes
             pout = render_result['alphainv_last'].clamp(1e-6, 1-1e-6)
             entropy_last_loss = -(pout*torch.log(pout) + (1-pout)*torch.log(1-pout)).mean()
@@ -529,7 +596,21 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
                 'optimizer_state_dict': optimizer.state_dict(),
             }, path)
             print(f'scene_rep_reconstruction ({stage}): saved checkpoints at', path)
-
+        
+        
+        if stage == 'fine':
+            torch.cuda.synchronize()
+            total_time += time.time() - time_start
+            
+            ## logging
+            if global_step % cfg_['log_interval'] == 0 or global_step == 1:
+                log_str = f"[TRAIN] Iter: {global_step} Loss: {loss.item()} PSNR: {psnr.item()} Time: {round(total_time, 2)}"
+                Logger.write_noprint(log_str)
+            
+            
+    if stage == 'fine':
+        Logger.write(f'total time: {round(total_time, 3)}')
+        
     if global_step != -1:
         save_ratio = False
         if save_ratio:
@@ -727,6 +808,7 @@ if __name__=='__main__':
         # render testset and eval
         if args.render_test:
             testsavedir = os.path.join(cfg.basedir, cfg.expname, f'render_test_{ckpt_name}')
+            psnr_dir = os.path.join(cfg.basedir, cfg.expname)
             os.makedirs(testsavedir, exist_ok=True)
             print('All results are dumped into', testsavedir)
             rgbs, depths, bgmaps = render_viewpoints(
@@ -734,7 +816,7 @@ if __name__=='__main__':
                     HW=data_dict['HW'][data_dict['i_test']],
                     Ks=data_dict['Ks'][data_dict['i_test']],
                     gt_imgs=[data_dict['images'][i].cpu().numpy() for i in data_dict['i_test']],
-                    savedir=testsavedir, dump_images=args.dump_images,
+                    savedir=testsavedir,psnr_dir=psnr_dir, dump_images=args.dump_images,
                     eval_ssim=args.eval_ssim, eval_lpips_alex=args.eval_lpips_alex, eval_lpips_vgg=args.eval_lpips_vgg,
                     **render_viewpoints_kwargs)
             imageio.mimwrite(os.path.join(testsavedir, 'video.rgb.mp4'), utils.to8b(rgbs), fps=30, quality=8)
