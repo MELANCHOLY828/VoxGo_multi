@@ -3,10 +3,11 @@ _base_ = '../default.py'
 basedir = '/data/liufengyi/Results/VoxGo_rewrite'
 
 data = dict(
-    dataset_type='llff',
+    dataset_type='facevideo',
     ndc=True,
-    width=1008,
-    height=756,
+    width=640,
+    height=480,
+    factor = 4.225,
 )
 
 coarse_train = dict(
@@ -17,8 +18,9 @@ fine_train = dict(
     N_iters=30000,
     N_rand=4096,
     weight_distortion=0.01,
-    pg_scale=[2000,4000,6000,8000],
-    ray_sampler='flatten',
+    # pg_scale=[2000,4000,6000,8000],
+    pg_scale=[],
+    ray_sampler='random',
     tv_before=1e9,
     tv_dense_before=10000,
     weight_tv_density=1e-5,
@@ -41,6 +43,7 @@ fine_model_and_render = dict(
     use_fine = True, 
     use_sh = True, 
     hash_type='DenseGrid',        #Add
+    flag_video = True,
     
 )
 

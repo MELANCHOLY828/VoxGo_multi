@@ -165,6 +165,7 @@ class DirectVoxGO(torch.nn.Module):
         self.mask_cache_thres = mask_cache_thres
         if mask_cache_world_size is None:
             mask_cache_world_size = self.world_size
+        self.mask_cache_world_size = mask_cache_world_size
         if mask_cache_path is not None and mask_cache_path:   #fine的时候yes
             mask_cache = grid.MaskGrid(
                     path=mask_cache_path,
@@ -418,13 +419,46 @@ class DirectVoxGO(torch.nn.Module):
 
         ret_dict = {}
         N = len(rays_o)
-
+        
         # sample points on rays
         ray_pts, ray_id, step_id = self.sample_ray(
                 rays_o=rays_o, rays_d=rays_d, **render_kwargs)
         interval = render_kwargs['stepsize'] * self.voxel_size_ratio
+        save_sh = False
+        if save_sh:
+            all_pts = torch.stack(torch.meshgrid(
+                    torch.linspace(0, self.mask_cache_world_size[0]-1, self.mask_cache_world_size[0]),
+                    torch.linspace(0, self.mask_cache_world_size[1]-1, self.mask_cache_world_size[1]),
+                    torch.linspace(0, self.mask_cache_world_size[2]-1, self.mask_cache_world_size[2]),
+                ), -1)
 
+            self_grid_xyz = torch.stack(torch.meshgrid(
+                    torch.linspace(self.xyz_min[0], self.xyz_max[0], self.mask_cache_world_size[0]),
+                    torch.linspace(self.xyz_min[1], self.xyz_max[1], self.mask_cache_world_size[1]),
+                    torch.linspace(self.xyz_min[2], self.xyz_max[2], self.mask_cache_world_size[2]),
+                ), -1)
+            
+            all_pts = torch.stack(torch.meshgrid(
+                    torch.linspace(-1, 1, 160),
+                    torch.linspace(-1, 1, 160),
+                    torch.linspace(-1, 1, 160),
+                ), -1)
+            self_grid_xyz = torch.stack(torch.meshgrid(
+                    torch.linspace(self.xyz_min[0], self.xyz_max[0], 160),
+                    torch.linspace(self.xyz_min[1], self.xyz_max[1], 160),
+                    torch.linspace(self.xyz_min[2], self.xyz_max[2], 160),
+                ), -1)
+            
+            mlp_grid = self.hash(self_grid_xyz.reshape(-1,3))
+            mlp_features = self.mlpnet(mlp_grid)
+            all_sh = mlp_features[:,1:]
+            import scipy.io as sio
+            import numpy as np      
+            sio.savemat('/data/liufengyi/Results/others/mat/Hotdog.mat', {'ray_pts': all_pts.reshape(-1,3).cpu().numpy(), 'sh_val': all_sh.cpu().numpy()})
+
+        
         #skip known free space
+
         if self.mask_cache is not None:
             mask = self.mask_cache(ray_pts)    #mask是[w,h,d],这一步主要是找到采样点对应的mask
             ray_pts = ray_pts[mask]
@@ -461,12 +495,17 @@ class DirectVoxGO(torch.nn.Module):
                 sh_val = sh_val[mask]
                 self.ratio3 += [mask.sum()/mask.shape[0]]
                 
-            sh_deg = 2
+            sh_deg = 0
             
             viewdirs = viewdirs[ray_id]
             if ray_pts.shape[0] == 0:
                 rgb = torch.zeros_like(ray_pts)
             else:
+                # #-----------将sh系数存入mat文件-------------#
+                # import scipy.io as sio
+                # import numpy as np      
+                # sio.savemat('/data/liufengyi/Results/others/mat/Materials.mat', {'ray_pts': ray_pts, 'sh_val': sh_val})
+                # #-----------end---------#
                 rgb = sh.eval_sh(sh_deg, sh_val.reshape(
                     *sh_val.shape[:-1],-1, (sh_deg + 1) ** 2), viewdirs)
                 m = nn.Sigmoid()

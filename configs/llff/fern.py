@@ -1,8 +1,8 @@
 _base_ = './llff_default.py'
 
-expname = 'fern'
+expname = 'fern_debug'
 
 data = dict(
-    datadir='/data1/liufengyi/all_datasets/mvsnerf/nerf_llff_data/fern/',
+    datadir='/data/liufengyi/Datasets/nerf_llff_data/fern/',
 )
 

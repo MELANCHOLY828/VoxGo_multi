@@ -20,10 +20,25 @@ from torch_efficient_distloss import flatten_eff_distloss
 os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
+def _normalize_01(t: torch.Tensor) -> torch.Tensor:
+    return (t - t.min()) / t.max()
+
+def _normalize_err(preds: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
+    err = torch.abs(preds - gt)
+    err = err.mean(-1, keepdim=True)  # mean over channels
+    # normalize between 0, 1 where 1 corresponds to the 90th percentile
+    # err = err.clamp_max(torch.quantile(err, 0.9))
+    err = _normalize_01(err)
+    return err.repeat(1, 1, 3)
+
+
+
 class Logger:
     filename = None
     filename1 = None
     filename2 = None
+    filename3 = None
+    filename4 = None
     @staticmethod
     def write(text):
         with open(Logger.filename, 'a') as log_file:
@@ -41,6 +56,14 @@ class Logger:
     @staticmethod
     def write2_noprint(text):
         with open(Logger.filename2, 'a') as log_file:
+            log_file.write(text + '\n')
+    @staticmethod
+    def write3_noprint(text):
+        with open(Logger.filename3, 'a') as log_file:
+            log_file.write(text + '\n')
+    @staticmethod
+    def write4_noprint(text):
+        with open(Logger.filename4, 'a') as log_file:
             log_file.write(text + '\n')
             
 def mkdirs(path):
@@ -60,8 +83,10 @@ def config_parser():
     '''
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--config', type=str, default='/data/liufengyi/MyCode/VoxGo_rewrite/configs/nerf/lego.py',
-                        help='config file path')
+    # parser.add_argument('--config', type=str, default="/data/liufengyi/MyCode/VoxGo_rewrite/configs/llff/fern.py",
+    #                     help='config file path')
+    parser.add_argument('--config', type=str, default="/data/liufengyi/MyCode/VoxGo_rewrite/configs/facebook/cook_spinach.py",
+                        help='config file path')   
     parser.add_argument("--seed", type=int, default=777,
                         help='Random seed')
     parser.add_argument("--no_reload", action='store_true',
@@ -101,7 +126,7 @@ def config_parser():
 
 
 @torch.no_grad()
-def render_viewpoints(model, render_poses, HW, Ks, ndc, render_kwargs,
+def render_viewpoints(model, i_test, render_poses, HW, Ks, ndc, render_kwargs,
                       gt_imgs=None, savedir=None, psnr_dir=None, dump_images=False,
                       render_factor=0, render_video_flipy=False, render_video_rot90=0,
                       eval_ssim=False, eval_lpips_alex=False, eval_lpips_vgg=False, testsavedir = 0):
@@ -120,18 +145,21 @@ def render_viewpoints(model, render_poses, HW, Ks, ndc, render_kwargs,
     bgmaps = []
     psnrs = []
     ssims = []
-    lpips_alex = []
-    lpips_vgg = []
+    lpips_alexs = []
+    lpips_vggs = []
     
     psnr_path = psnr_dir
     ssim_path = psnr_dir
+    lpips = psnr_dir
     mkdirs(psnr_path)
     mkdirs(ssim_path)
     Logger.filename1 = os.path.join(psnr_path, 'psnr.txt') 
     Logger.filename2 = os.path.join(ssim_path, 'ssim.txt') 
+    Logger.filename3 = os.path.join(lpips, 'lpips_alex.txt') 
+    Logger.filename4 = os.path.join(lpips, 'lpips_vgg.txt') 
     
     for i, c2w in enumerate(tqdm(render_poses)):
-
+        
         H, W = HW[i]
         K = Ks[i]
         c2w = torch.Tensor(c2w)
@@ -142,40 +170,96 @@ def render_viewpoints(model, render_poses, HW, Ks, ndc, render_kwargs,
         rays_o = rays_o.flatten(0,-2)
         rays_d = rays_d.flatten(0,-2)
         viewdirs = viewdirs.flatten(0,-2)
-        render_result_chunks = [
-            {k: v for k, v in model(ro, rd, vd, **render_kwargs).items() if k in keys}
-            for ro, rd, vd in zip(rays_o.split(8192, 0), rays_d.split(8192, 0), viewdirs.split(8192, 0))
-        ]
-        render_result = {
-            k: torch.cat([ret[k] for ret in render_result_chunks]).reshape(H,W,-1)
-            for k in render_result_chunks[0].keys()
-        }
-        rgb = render_result['rgb_marched'].cpu().numpy()
-        # imageio.imwrite(os.path.join(testsavedir, f'rgb_{i}.png'), utils.to8b(rgb))
-        depth = render_result['depth'].cpu().numpy()
-        bgmap = render_result['alphainv_last'].cpu().numpy()
+        if model.flag_video:
+            view = i_test[i]
+            gt_img_ = gt_imgs[i]
+            for flame in range(len(gt_img_)):
+                # image_t = view % 3/3. + flame
+                image_t = flame/29.0
+                render_result_chunks = [
+                    {k: v for k, v in model(ro, rd, vd, image_t=torch.ones(ro.shape[0],device=ro.device) * image_t, **render_kwargs).items() if k in keys}
+                    for ro, rd, vd in zip(rays_o.split(8192, 0), rays_d.split(8192, 0), viewdirs.split(8192, 0))
+                ]     
+                render_result = {
+                    k: torch.cat([ret[k] for ret in render_result_chunks]).reshape(H,W,-1)
+                    for k in render_result_chunks[0].keys()
+                }           
+                
+                rgb = render_result['rgb_marched'].cpu().numpy()
+                # imageio.imwrite(os.path.join(testsavedir, f'rgb_{i}.png'), utils.to8b(rgb))
+                depth = render_result['depth'].cpu().numpy()
+                bgmap = render_result['alphainv_last'].cpu().numpy()
 
-        rgbs.append(rgb)
-        depths.append(depth)
-        bgmaps.append(bgmap)
-        if i==0:
-            print('Testing', rgb.shape)
+                rgbs.append(rgb)
+                depths.append(depth)
+                bgmaps.append(bgmap)
+             
+                if gt_img_ is not None and render_factor==0:
+                    psnr = -10. * np.log10(np.mean(np.square(rgb - gt_img_[flame])))
+                    psnr_str = f"PSNR: {psnr}"
+                    Logger.write1_noprint(psnr_str)
+                    psnrs.append(psnr)
+                    eval_ssim = True
+                    eval_lpips_alex = True
+                    eval_lpips_vgg = True            
+                    if eval_ssim:
+                        ssim = utils.rgb_ssim(rgb, gt_img_[flame], max_val=1)
+                        ssim_str = f"SSIM: {ssim}"
+                        Logger.write2_noprint(ssim_str)
+                        ssims.append(ssim)
+                    if eval_lpips_alex:
+                        lpips_alex = utils.rgb_lpips(rgb, gt_img_[flame], net_name='alex', device=c2w.device)
+                        lpips_alex_str = f"lpips_alex: {lpips_alex}"
+                        Logger.write3_noprint(lpips_alex_str)
+                        lpips_alexs.append(lpips_alex)
+                    if eval_lpips_vgg:
+                        lpips_vgg = utils.rgb_lpips(rgb, gt_img_[flame], net_name='vgg', device=c2w.device)
+                        lpips_vgg_str = f"lpips_vgg: {lpips_vgg}"
+                        Logger.write4_noprint(lpips_vgg_str)
+                        lpips_vggs.append(lpips_vgg)                     
+        else:           
+            render_result_chunks = [
+                {k: v for k, v in model(ro, rd, vd, **render_kwargs).items() if k in keys}
+                for ro, rd, vd in zip(rays_o.split(8192, 0), rays_d.split(8192, 0), viewdirs.split(8192, 0))
+            ]
+            render_result = {
+                k: torch.cat([ret[k] for ret in render_result_chunks]).reshape(H,W,-1)
+                for k in render_result_chunks[0].keys()
+            }
+            rgb = render_result['rgb_marched'].cpu().numpy()
+            # imageio.imwrite(os.path.join(testsavedir, f'rgb_{i}.png'), utils.to8b(rgb))
+            depth = render_result['depth'].cpu().numpy()
+            bgmap = render_result['alphainv_last'].cpu().numpy()
 
-        if gt_imgs is not None and render_factor==0:
-            psnr = -10. * np.log10(np.mean(np.square(rgb - gt_imgs[i])))
-            psnr_str = f"PSNR: {psnr}"
-            Logger.write1_noprint(psnr_str)
-            psnrs.append(psnr)
-            eval_ssim = True
-            if eval_ssim:
-                ssim = utils.rgb_ssim(rgb, gt_imgs[i], max_val=1)
-                ssim_str = f"SSIM: {ssim}"
-                Logger.write2_noprint(ssim_str)
-                ssims.append(ssim)
-            if eval_lpips_alex:
-                lpips_alex.append(utils.rgb_lpips(rgb, gt_imgs[i], net_name='alex', device=c2w.device))
-            if eval_lpips_vgg:
-                lpips_vgg.append(utils.rgb_lpips(rgb, gt_imgs[i], net_name='vgg', device=c2w.device))
+            rgbs.append(rgb)
+            depths.append(depth)
+            bgmaps.append(bgmap)
+            if i==0:
+                print('Testing', rgb.shape)
+
+            if gt_imgs is not None and render_factor==0:
+                psnr = -10. * np.log10(np.mean(np.square(rgb - gt_imgs[i])))
+                psnr_str = f"PSNR: {psnr}"
+                Logger.write1_noprint(psnr_str)
+                psnrs.append(psnr)
+                eval_ssim = True
+                eval_lpips_alex = True
+                eval_lpips_vgg = True            
+                if eval_ssim:
+                    ssim = utils.rgb_ssim(rgb, gt_imgs[i], max_val=1)
+                    ssim_str = f"SSIM: {ssim}"
+                    Logger.write2_noprint(ssim_str)
+                    ssims.append(ssim)
+                if eval_lpips_alex:
+                    lpips_alex = utils.rgb_lpips(rgb, gt_imgs[i], net_name='alex', device=c2w.device)
+                    lpips_alex_str = f"lpips_alex: {lpips_alex}"
+                    Logger.write3_noprint(lpips_alex_str)
+                    lpips_alexs.append(lpips_alex)
+                if eval_lpips_vgg:
+                    lpips_vgg = utils.rgb_lpips(rgb, gt_imgs[i], net_name='vgg', device=c2w.device)
+                    lpips_vgg_str = f"lpips_vgg: {lpips_vgg}"
+                    Logger.write4_noprint(lpips_vgg_str)
+                    lpips_vggs.append(lpips_vgg)
 
     if len(psnrs):
         avg_psnr = np.mean(psnrs)
@@ -186,16 +270,25 @@ def render_viewpoints(model, render_poses, HW, Ks, ndc, render_kwargs,
         ssim_avg = f"avg_SSIM: {avg_ssim}"
         Logger.write2_noprint(ssim_avg)
         
-        print('Testing psnr', np.mean(psnrs), '(avg)')
+        avg_lpips_alex = np.mean(lpips_alexs)
+        lpips_alex_avg = f"avg_lpips_alex: {avg_lpips_alex}"
+        Logger.write3_noprint(lpips_alex_avg)
+        
+        avg_lpips_vgg = np.mean(lpips_vggs)
+        lpips_vgg_avg = f"avg_lpips_vgg: {avg_lpips_vgg}"
+        Logger.write4_noprint(lpips_vgg_avg)
+        
+        
+        print('Testing psnr', avg_psnr, '(avg)')
         # if savedir is not None:
         #     import json       
         #     filename='PSNR.json'
         #     with open(savedir+'/'+filename,'w') as file_obj:
         #         json.dump(psnrs,file_obj)
         
-        if eval_ssim: print('Testing ssim', np.mean(ssims), '(avg)')
-        if eval_lpips_vgg: print('Testing lpips (vgg)', np.mean(lpips_vgg), '(avg)')
-        if eval_lpips_alex: print('Testing lpips (alex)', np.mean(lpips_alex), '(avg)')
+        if eval_ssim: print('Testing ssim', avg_ssim, '(avg)')
+        if eval_lpips_alex: print('Testing lpips (alex)', avg_lpips_alex, '(avg)')
+        if eval_lpips_vgg: print('Testing lpips (vgg)', avg_lpips_vgg, '(avg)')
 
     if render_video_flipy:
         for i in range(len(rgbs)):
@@ -211,9 +304,20 @@ def render_viewpoints(model, render_poses, HW, Ks, ndc, render_kwargs,
     dump_images = True  #保存图片
     if savedir is not None and dump_images:
         for i in trange(len(rgbs)):
+            
             rgb8 = utils.to8b(rgbs[i])
-            filename = os.path.join(savedir, '{:03d}.png'.format(i))
+            view = i//30
+            flame = i % 30
+            gt_img_ = gt_imgs[view]
+            filename = os.path.join(savedir, f'{view}_{flame:03d}.png')
             imageio.imwrite(filename, rgb8)
+       
+            out_img = torch.cat((torch.from_numpy(rgbs[i]), torch.from_numpy(gt_img_[i])), dim=0)
+            out_img = torch.cat((out_img, _normalize_err(torch.from_numpy(rgbs[i]), torch.from_numpy(gt_img_[i]))), dim=0)
+            filename = os.path.join(savedir, f'{view}_{flame:02d}.png')
+            imageio.imwrite(filename, out_img*255)  
+     
+        
 
     rgbs = np.array(rgbs)
     depths = np.array(depths)
@@ -507,13 +611,26 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             rays_d = rays_d_tr[sel_i]
             viewdirs = viewdirs_tr[sel_i]
         elif cfg_train.ray_sampler == 'random':
-            sel_b = torch.randint(rgb_tr.shape[0], [cfg_train.N_rand])
-            sel_r = torch.randint(rgb_tr.shape[1], [cfg_train.N_rand])
-            sel_c = torch.randint(rgb_tr.shape[2], [cfg_train.N_rand])
-            target = rgb_tr[sel_b, sel_r, sel_c]
-            rays_o = rays_o_tr[sel_b, sel_r, sel_c]
-            rays_d = rays_d_tr[sel_b, sel_r, sel_c]
-            viewdirs = viewdirs_tr[sel_b, sel_r, sel_c]
+            if cfg.fine_model_and_render['flag_video']:   #video
+                sel_b = torch.randint(rgb_tr.shape[0], [cfg_train.N_rand])   #view
+                sel_t = torch.randint(rgb_tr.shape[1], [cfg_train.N_rand])
+                sel_r = torch.randint(rgb_tr.shape[2], [cfg_train.N_rand])
+                sel_c = torch.randint(rgb_tr.shape[3], [cfg_train.N_rand])
+                target = rgb_tr[sel_b, sel_t, sel_r, sel_c]
+                rays_o = rays_o_tr[sel_b, sel_r, sel_c]
+                rays_d = rays_d_tr[sel_b, sel_r, sel_c]
+                viewdirs = viewdirs_tr[sel_b, sel_r, sel_c]
+                # view_idx = sel_b + sel_b//7 + 1
+                # image_t = sel_t + view_idx % 3/3.
+                image_t = sel_t/29.0
+            else:
+                sel_b = torch.randint(rgb_tr.shape[0], [cfg_train.N_rand])   #view
+                sel_r = torch.randint(rgb_tr.shape[1], [cfg_train.N_rand])
+                sel_c = torch.randint(rgb_tr.shape[2], [cfg_train.N_rand])
+                target = rgb_tr[sel_b, sel_r, sel_c]
+                rays_o = rays_o_tr[sel_b, sel_r, sel_c]
+                rays_d = rays_d_tr[sel_b, sel_r, sel_c]
+                viewdirs = viewdirs_tr[sel_b, sel_r, sel_c]
         else:
             raise NotImplementedError
 
@@ -524,10 +641,16 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             viewdirs = viewdirs.to(device)
 
         # volume rendering
-        render_result = model(
-            rays_o, rays_d, viewdirs,
-            global_step=global_step, is_train=True,
-            **render_kwargs)
+        if cfg.fine_model_and_render['flag_video']:
+            render_result = model(
+                rays_o, rays_d, viewdirs,
+                global_step=global_step, image_t = image_t, is_train=True,
+                **render_kwargs)
+        else:
+            render_result = model(
+                rays_o, rays_d, viewdirs,
+                global_step=global_step, is_train=True,
+                **render_kwargs)            
 
         # gradient descent step
         optimizer.zero_grad(set_to_none=True)
@@ -562,13 +685,19 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         loss.backward()
 
         if global_step<cfg_train.tv_before and global_step>cfg_train.tv_after and global_step%cfg_train.tv_every==0:   #yes
-            if cfg_train.weight_tv_density>0:   #yes
-                model.density_total_variation_add_grad(
-                    cfg_train.weight_tv_density/len(rays_o), global_step<cfg_train.tv_dense_before)
-            if cfg_train.weight_tv_k0>0:   #yes
-                model.k0_total_variation_add_grad(
-                    cfg_train.weight_tv_k0/len(rays_o), global_step<cfg_train.tv_dense_before)
-
+            if model.use_fine:
+                if cfg_train.weight_tv_hash>0:   #yes
+                    model.hash_total_variation_add_grad(
+                        cfg_train.weight_tv_hash/len(rays_o), global_step<cfg_train.tv_dense_before)
+            else:
+                if cfg_train.weight_tv_density>0:   #yes
+                    model.density_total_variation_add_grad(
+                        cfg_train.weight_tv_density/len(rays_o), global_step<cfg_train.tv_dense_before)
+                if cfg_train.weight_tv_k0>0:   #yes
+                    model.k0_total_variation_add_grad(
+                        cfg_train.weight_tv_k0/len(rays_o), global_step<cfg_train.tv_dense_before)
+            
+                                
         optimizer.step()
         psnr_lst.append(psnr.item())
 
@@ -714,7 +843,7 @@ if __name__=='__main__':
         os.makedirs(dirpath,exist_ok=True)
         record_code = {
             'name' : cfg.expname,
-            'description' : "VoxGo代码修改,fine网格为160^3,上采样细分网络;mlp网络为1*128;对之前代码修改,尝试看能不能加快速度"
+            'description' : "数据集改为llff格式"
         }
         write_json_data(dirpath, record_code)
         
@@ -811,7 +940,9 @@ if __name__=='__main__':
             psnr_dir = os.path.join(cfg.basedir, cfg.expname)
             os.makedirs(testsavedir, exist_ok=True)
             print('All results are dumped into', testsavedir)
+            print("i_test is :", data_dict['i_test'])
             rgbs, depths, bgmaps = render_viewpoints(
+                    i_test=data_dict['i_test'],
                     render_poses=data_dict['poses'][data_dict['i_test']],
                     HW=data_dict['HW'][data_dict['i_test']],
                     Ks=data_dict['Ks'][data_dict['i_test']],

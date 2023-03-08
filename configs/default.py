@@ -28,7 +28,7 @@ data = dict(
     factor=4,                     # [TODO]
     width=None,                   # enforce image width
     height=None,                  # enforce image height
-    llffhold=8,                   # testsplit
+    llffhold=50,                   # testsplit   
     load_depths=False,            # load depth
 
     # Below are unbounded inward-facing specific settings.
@@ -89,7 +89,7 @@ coarse_model_and_render = dict(
     hash_channel = 28,
     hidden_features = 128,
     hidden_layers = 1,
-    out_features = 28,
+    out_features = 4,
     use_fine = False, 
     
     hash_type='DenseGrid',        #Add

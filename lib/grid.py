@@ -16,12 +16,12 @@ render_utils_cuda = load(
             for path in ['cuda/render_utils.cpp', 'cuda/render_utils_kernel.cu']],
         verbose=True)
 
-# total_variation_cuda = load(
-#         name='total_variation_cuda',
-#         sources=[
-#             os.path.join(parent_dir, path)
-#             for path in ['cuda/total_variation.cpp', 'cuda/total_variation_kernel.cu']],
-#         verbose=True)
+total_variation_cuda = load(
+        name='total_variation_cuda',
+        sources=[
+            os.path.join(parent_dir, path)
+            for path in ['cuda/total_variation.cpp', 'cuda/total_variation_kernel.cu']],
+        verbose=True)
 
 
 def create_grid(type, **kwargs):
