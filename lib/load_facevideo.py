@@ -3,7 +3,20 @@ import os, imageio
 import torch
 import scipy
 import glob
+from typing import Tuple, Optional, List
+from skimage.transform import resize  #resize更改图像尺寸大小
 
+from .intrinsics import Intrinsics
+
+
+def _split_poses_bounds(poses_bounds: np.ndarray) -> Tuple[np.ndarray, np.ndarray, Intrinsics]:
+    poses = poses_bounds[:, :15].reshape(-1, 3, 5)  # (N_images, 3, 5)
+    # near_fars = poses_bounds[:, -2:]  # (N_images, 2)
+    H, W, focal = poses[0, :, -1]  # original intrinsics, same for all images
+    intrinsics = Intrinsics(
+        width=W, height=H, focal_x=focal, focal_y=focal, center_x=W / 2, center_y=H / 2)
+    return intrinsics
+    return poses[:, :, :4], near_fars, intrinsics
 ########## Slightly modified version of LLFF data loading code
 ##########  see https://github.com/Fyusion/LLFF for original
 def imread(f):
@@ -82,9 +95,13 @@ def _minify(basedir, factors=[], resolutions=[]):
         print('Done')
 
 
-def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True, load_depths=False):
+def _load_data(multi, flag_multi, basedir, factor=None, load_imgs=True, load_depths=False):
     # basedir1 = '/data1/liufengyi/all_datasets/facebook/cook_spinach_img/resize_480*640_1/'
     poses_arr = np.load(os.path.join(basedir, 'poses_bounds.npy'))
+    
+    # intrinsics = _split_poses_bounds(poses_arr)
+    # intrinsics.scale(1 / factor)
+    
     if poses_arr.shape[1] == 17:   #yes
         poses = poses_arr[:, :-2].reshape([-1, 3, 5]).transpose([1,2,0])
     elif poses_arr.shape[1] == 14:
@@ -92,35 +109,7 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True, lo
     else:
         raise NotImplementedError
     bds = poses_arr[:, -2:].transpose([1,0])
-    img = [sorted(glob.glob(os.path.join(f, '*.jpg'))) for f in sorted(glob.glob(os.path.join(basedir, 'cam*')))]  #[[cam00],[cam01]]
-    # img0 = [os.path.join(f, os.listdir(f)[0]) for f in sorted(glob.glob(os.path.join(basedir, 'cam*')))][0]
-    
-    # # img0 = [os.path.join(basedir, 'images', f) for f in sorted(os.listdir(os.path.join(basedir, 'images'))) \
-    # #         if f.endswith('JPG') or f.endswith('jpg') or f.endswith('png')][0]
-    # sh = imageio.imread(img0).shape
-
-    sfx = ''
-    
-    # if height is not None and width is not None:   #yes
-    #     _minify(basedir, resolutions=[[height, width]])
-    #     sfx = '_{}x{}'.format(width, height)
-    # elif factor is not None and factor != 1:
-    #     sfx = '_{}'.format(factor)
-    #     _minify(basedir, factors=[factor])
-    #     factor = factor
-    # elif height is not None:
-    #     factor = sh[0] / float(height)
-    #     width = int(sh[1] / factor)
-    #     _minify(basedir, resolutions=[[height, width]])
-    #     sfx = '_{}x{}'.format(width, height)
-    # elif width is not None:
-    #     factor = sh[1] / float(width)
-    #     height = int(sh[0] / factor)
-    #     _minify(basedir, resolutions=[[height, width]])
-    #     sfx = '_{}x{}'.format(width, height)
-    # else:
-    #     factor = 1
-
+    # img = [sorted(glob.glob(os.path.join(f, '*.jpg'))) for f in sorted(glob.glob(os.path.join(basedir, 'cam*')))]  #[[cam00],[cam01]]
 
     imgfiles = [sorted(glob.glob(os.path.join(f, '*.jpg'))) for f in sorted(glob.glob(os.path.join(basedir, 'cam*')))]  #[[cam00],[cam01]]
 
@@ -148,14 +137,32 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True, lo
     if poses.shape[1] == 4:
         poses = np.concatenate([poses, np.zeros_like(poses[:,[0]])], 1)
         poses[2, 4, :] = np.load(os.path.join(basedir, 'hwf_cxcy.npy'))[2]
-    poses[:2, 4, :] = np.array(sh[:2]).reshape([2, 1])
-    poses[2, 4, :] = poses[2, 4, :] * 1./factor
+    # poses[:2, 4, :] = np.array(sh[:2]).reshape([2, 1])
+    poses[:, 4, :] = poses[:, 4, :] * 1./factor
 
     if not load_imgs:
         return poses, bds
     imgs = []
+    flame = list(range(30))
+    if flag_multi:
+        if multi==0:   #
+            flame = flame[::8]
+            flame1 = 8
+        elif multi==1:
+            flame = flame[::4]
+            flame1 = 4
+        elif multi==2:
+            flame = flame[::2]
+            flame1 = 2
+        elif multi==3:
+            flame = flame[::1]   
+            flame1 = 1 
+    else:
+        flame1 = 1
     for view in range(len(imgfiles)):
-        img = [imread(f)[...,:3]/255. for f in imgfiles[view]]
+        # img = [imread(f)[...,:3]/255. for f in imgfiles[view]]
+
+        img = [resize(imread(f)[...,:3]/255.,(int(sh[0]/factor),int(sh[1]/factor))) for f in imgfiles[view][:30][::flame1]]   #存成unit8格式 节约空间
         imgs += [np.stack(img, -1)]
     imgs = np.stack(imgs, -1)
     
@@ -165,6 +172,7 @@ def _load_data(basedir, factor=None, width=None, height=None, load_imgs=True, lo
     print('Loaded image data', imgs.shape, poses[:,-1,0])
 
     if not load_depths:   #yes
+        return poses, bds, imgs, flame1
         return poses, bds, imgs
 
     depthdir = os.path.join(basedir, 'stereo', 'depth_maps')
@@ -302,12 +310,12 @@ def spherify_poses(poses, bds, depths):
     return poses_reset, radius, bds, depths
 
 
-def load_facevideo_data(basedir, factor=8, width=None, height=None,
+def load_facevideo_data(multi, flag_multi, basedir, factor=8,
                    recenter=True, rerotate=True,
                    bd_factor=.75, spherify=False, path_zflat=False, load_depths=False,
                    movie_render_kwargs={}):
 
-    poses, bds, imgs, *depths = _load_data(basedir, factor=factor, width=width, height=height,
+    poses, bds, imgs, flame1, *depths = _load_data(multi, flag_multi, basedir, factor=factor,
                                            load_depths=load_depths) # factor=8 downsamples original imgs by 8x
     print('Loaded', basedir, bds.min(), bds.max())
     if load_depths:
@@ -424,5 +432,5 @@ def load_facevideo_data(basedir, factor=8, width=None, height=None,
     images = images.astype(np.float32)
     poses = poses.astype(np.float32)
 
-    return images, depths, poses, bds, render_poses, i_test
+    return images, depths, poses, bds, render_poses, i_test, flame1
 

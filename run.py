@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+from lib.regularization import *
 from lib import utils, dvgo, dcvgo, dmpigo
 # from lib import utils, dvgo
 
@@ -173,9 +173,11 @@ def render_viewpoints(model, i_test, render_poses, HW, Ks, ndc, render_kwargs,
         if model.flag_video:
             view = i_test[i]
             gt_img_ = gt_imgs[i]
+            total_time = 0
             for flame in range(len(gt_img_)):
                 # image_t = view % 3/3. + flame
-                image_t = flame/29.0
+                image_t = (flame/29.0)*2-1
+                time_start = time.time()
                 render_result_chunks = [
                     {k: v for k, v in model(ro, rd, vd, image_t=torch.ones(ro.shape[0],device=ro.device) * image_t, **render_kwargs).items() if k in keys}
                     for ro, rd, vd in zip(rays_o.split(8192, 0), rays_d.split(8192, 0), viewdirs.split(8192, 0))
@@ -184,6 +186,10 @@ def render_viewpoints(model, i_test, render_poses, HW, Ks, ndc, render_kwargs,
                     k: torch.cat([ret[k] for ret in render_result_chunks]).reshape(H,W,-1)
                     for k in render_result_chunks[0].keys()
                 }           
+                torch.cuda.synchronize()
+                nowtime = time.time() - time_start
+                print("time:",nowtime)
+                total_time += nowtime
                 
                 rgb = render_result['rgb_marched'].cpu().numpy()
                 # imageio.imwrite(os.path.join(testsavedir, f'rgb_{i}.png'), utils.to8b(rgb))
@@ -260,7 +266,7 @@ def render_viewpoints(model, i_test, render_poses, HW, Ks, ndc, render_kwargs,
                     lpips_vgg_str = f"lpips_vgg: {lpips_vgg}"
                     Logger.write4_noprint(lpips_vgg_str)
                     lpips_vggs.append(lpips_vgg)
-
+    print("total time:", total_time)
     if len(psnrs):
         avg_psnr = np.mean(psnrs)
         psnr_avg = f"avg_PSNR: {avg_psnr}"
@@ -335,16 +341,17 @@ def seed_everything():
     random.seed(args.seed)
 
 
-def load_everything(args, cfg):
+def load_everything(args, cfg, multi):
     '''Load images / poses / camera settings / data split.
     '''
-    data_dict = load_data(cfg.data)
+    
+    data_dict = load_data(cfg.data, multi)
 
     # remove useless field
     kept_keys = {
             'hwf', 'HW', 'Ks', 'near', 'far', 'near_clip',
             'i_train', 'i_val', 'i_test', 'irregular_shape',
-            'poses', 'render_poses', 'images'}
+            'poses', 'render_poses', 'images', 'flame1'}
     for k in list(data_dict.keys()):
         if k not in kept_keys:
             data_dict.pop(k)
@@ -432,8 +439,8 @@ def compute_bbox_by_coarse_geo(model_class, model_path, thres):
 def create_new_model(cfg, cfg_model, cfg_train, xyz_min, xyz_max, stage, coarse_ckpt_path):
     model_kwargs = copy.deepcopy(cfg_model)
     num_voxels = model_kwargs.pop('num_voxels')    #256^3
-    if len(cfg_train.pg_scale):    # [2000, 4000, 6000, 8000]   yes
-        num_voxels = int(num_voxels / (2**len(cfg_train.pg_scale)))
+    # if len(cfg_train.pg_scale):    # [2000, 4000, 6000, 8000]   yes
+    #     num_voxels = int(num_voxels / (2**len(cfg_train.pg_scale)))
 
     if cfg.data.ndc:    #yes
         print(f'scene_rep_reconstruction ({stage}): \033[96muse multiplane images\033[0m')
@@ -472,7 +479,8 @@ def load_existed_model(args, cfg, cfg_train, reload_ckpt_path):
     return model, optimizer, start
 
 
-def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, data_dict, stage, coarse_ckpt_path=None):
+def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, data_dicts, stage, coarse_ckpt_path=None):
+    data_dict = data_dicts[0]
     cfg_ = {
         'log_interval': 5,
     }
@@ -482,9 +490,9 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         xyz_shift = (xyz_max - xyz_min) * (cfg_model.world_bound_scale - 1) / 2
         xyz_min -= xyz_shift
         xyz_max += xyz_shift
-    HW, Ks, near, far, i_train, i_val, i_test, poses, render_poses, images = [
+    HW, Ks, near, far, i_train, i_val, i_test, poses, render_poses, images, flame1 = [
         data_dict[k] for k in [
-            'HW', 'Ks', 'near', 'far', 'i_train', 'i_val', 'i_test', 'poses', 'render_poses', 'images'
+            'HW', 'Ks', 'near', 'far', 'i_train', 'i_val', 'i_test', 'poses', 'render_poses', 'images', 'flame1',
         ]
     ]
 
@@ -509,7 +517,9 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
     else:    #第一次训练完 就有预训练的模型啦
         print(f'scene_rep_reconstruction ({stage}): reload from {reload_ckpt_path}')
         model, optimizer, start = load_existed_model(args, cfg, cfg_train, reload_ckpt_path)
-
+        
+    # model = torch.jit.script(model)
+    
     # init rendering setup
     render_kwargs = {
         'near': data_dict['near'],
@@ -576,7 +586,11 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
     time0 = time.time()
     global_step = -1
     total_time = 0
+    multi = 0
     if stage == 'fine':
+        
+        plane_tv = L1TimePlanes(cfg_train.l1_time_planes, what='field')
+        time_smoo = TimeSmoothness(cfg_train.time_smoothness_weight, what='field')
         ## Create log dirs
         log_dir = os.path.join(cfg.basedir, cfg.expname)
         mkdirs(log_dir)
@@ -596,13 +610,23 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             if isinstance(model, (dvgo.DirectVoxGO, dcvgo.DirectContractedVoxGO)):
                 model.scale_volume_grid(cur_voxels)
             elif isinstance(model, dmpigo.DirectMPIGO):
-                model.scale_volume_grid(cur_voxels, model.mpi_depth)
+                model.scale_volume_grid(cfg_model.num_voxels, model.mpi_depth)
             else:
                 raise NotImplementedError
             optimizer = utils.create_optimizer_or_freeze_model(model, cfg_train, global_step=0)
             model.act_shift -= cfg_train.decay_after_scale
             torch.cuda.empty_cache()
-
+        if global_step in cfg.data.multi_scale:
+            multi += 1
+            data_dict = data_dicts[multi]
+            # data_dict = load_everything(args=args, cfg=cfg, multi=multi)
+            HW, Ks, near, far, i_train, i_val, i_test, poses, render_poses, images, flame1 = [
+                data_dict[k] for k in [
+                    'HW', 'Ks', 'near', 'far', 'i_train', 'i_val', 'i_test', 'poses', 'render_poses', 'images', 'flame1'
+                ]
+            ]
+            rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz, batch_index_sampler = gather_training_rays()
+            
         # random sample rays
         if cfg_train.ray_sampler in ['flatten', 'in_maskcache']:
             sel_i = batch_index_sampler()
@@ -622,7 +646,13 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
                 viewdirs = viewdirs_tr[sel_b, sel_r, sel_c]
                 # view_idx = sel_b + sel_b//7 + 1
                 # image_t = sel_t + view_idx % 3/3.
-                image_t = sel_t/29.0
+                sel_t = sel_t * flame1
+                if cfg.fine_model_and_render['mlp_t']:
+                    image_t = (sel_t/29.0)*2-1
+                elif cfg.fine_model_and_render['hash_t']:
+                    image_t = sel_t
+                elif cfg.fine_model_and_render['plane_t']:
+                    image_t = (sel_t/29.0)*2-1
             else:
                 sel_b = torch.randint(rgb_tr.shape[0], [cfg_train.N_rand])   #view
                 sel_r = torch.randint(rgb_tr.shape[1], [cfg_train.N_rand])
@@ -682,6 +712,12 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             rgbper = (render_result['raw_rgb'] - target[render_result['ray_id']]).pow(2).sum(-1)
             rgbper_loss = (rgbper * render_result['weights'].detach()).sum() / len(rays_o)
             loss += cfg_train.weight_rgbper * rgbper_loss
+        # if global_step<cfg_train.plane_tv_before and global_step>cfg_train.plane_tv_after and global_step%cfg_train.tv_every==0:   #yes
+        #     if model.use_fine:
+        #         tv_loss = plane_tv.regularize(model)
+        #         loss += tv_loss
+        #         smoot_loss = time_smoo.regularize(model)
+        #         loss += smoot_loss
         loss.backward()
 
         if global_step<cfg_train.tv_before and global_step>cfg_train.tv_after and global_step%cfg_train.tv_every==0:   #yes
@@ -697,7 +733,8 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
                     model.k0_total_variation_add_grad(
                         cfg_train.weight_tv_k0/len(rays_o), global_step<cfg_train.tv_dense_before)
             
-                                
+
+                
         optimizer.step()
         psnr_lst.append(psnr.item())
 
@@ -770,8 +807,8 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         print(f'scene_rep_reconstruction ({stage}): saved checkpoints at', last_ckpt_path)
 
 
-def train(args, cfg, data_dict):
-
+def train(args, cfg, data_dicts):
+    data_dict = data_dicts[0]
     # init
     print('train: start')
     eps_time = time.time()
@@ -812,7 +849,7 @@ def train(args, cfg, data_dict):
             args=args, cfg=cfg,
             cfg_model=cfg.fine_model_and_render, cfg_train=cfg.fine_train,
             xyz_min=xyz_min_fine, xyz_max=xyz_max_fine,
-            data_dict=data_dict, stage='fine',
+            data_dicts=data_dicts, stage='fine',
             coarse_ckpt_path=coarse_ckpt_path)
     eps_fine = time.time() - eps_fine
     eps_time_str = f'{eps_fine//3600:02.0f}:{eps_fine//60%60:02.0f}:{eps_fine%60:02.0f}'
@@ -843,14 +880,15 @@ if __name__=='__main__':
         os.makedirs(dirpath,exist_ok=True)
         record_code = {
             'name' : cfg.expname,
-            'description' : "数据集改为llff格式"
+            'description' : "动态,t 1维经过mlp,64维;网格分辨率256;latencode input:1_28 layer:2_128;图片分辨率/4.225"
         }
         write_json_data(dirpath, record_code)
-        
-        
-        # load images / poses / camera settings / data split
-        data_dict = load_everything(args=args, cfg=cfg)
-
+        data_dicts = []
+        for multi, factor in enumerate(cfg.data.factor):
+            
+            # load images / poses / camera settings / data split
+            data_dict = load_everything(args=args, cfg=cfg, multi=multi)
+            data_dicts += [data_dict]
         # export scene bbox and camera poses in 3d for debugging and visualization
         if args.export_bbox_and_cams_only:   #no
             print('Export bbox and cameras...')
@@ -886,7 +924,7 @@ if __name__=='__main__':
 
         # train
         if not args.render_only:   #yes
-            train(args, cfg, data_dict)
+            train(args, cfg, data_dicts)
 
         # load model for rendring
         if args.render_test or args.render_train or args.render_video:
@@ -936,6 +974,7 @@ if __name__=='__main__':
 
         # render testset and eval
         if args.render_test:
+            data_dict = data_dicts[-1]
             testsavedir = os.path.join(cfg.basedir, cfg.expname, f'render_test_{ckpt_name}')
             psnr_dir = os.path.join(cfg.basedir, cfg.expname)
             os.makedirs(testsavedir, exist_ok=True)

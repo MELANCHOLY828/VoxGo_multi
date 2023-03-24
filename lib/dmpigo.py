@@ -2,6 +2,7 @@ import os
 import time
 import functools
 import numpy as np
+import itertools
 
 import torch
 import torch.nn as nn
@@ -10,10 +11,47 @@ from torch import Tensor
 from einops import rearrange
 from torch_scatter import scatter_add, segment_coo
 from . import sh
+from typing import Optional, Union, List, Dict, Sequence, Iterable, Collection, Callable
 
 from . import grid
 from .dvgo import Raw2Alpha, Alphas2Weights, render_utils_cuda
 
+class Embedding(nn.Module):
+    def __init__(self, in_channels, N_freqs, logscale=True):
+        """
+        Defines a function that embeds x to (x, sin(2^k x), cos(2^k x), ...)
+        in_channels: number of input channels (3 for both xyz and direction)
+        """
+        super(Embedding, self).__init__()
+        self.N_freqs = N_freqs
+        self.in_channels = in_channels
+        self.funcs = [torch.sin, torch.cos]
+        self.out_channels = in_channels*(len(self.funcs)*N_freqs+1)
+
+        if logscale:
+            self.freq_bands = 2**torch.linspace(0, N_freqs-1, N_freqs)
+        else:
+            self.freq_bands = torch.linspace(1, 2**(N_freqs-1), N_freqs)
+
+    def forward(self, x):
+        """
+        Embeds x to (x, sin(2^k x), cos(2^k x), ...) 
+        Different from the paper, "x" is also in the output
+        See https://github.com/bmild/nerf/issues/12
+
+        Inputs:
+            x: (B, self.in_channels)
+
+        Outputs:
+            out: (B, self.out_channels)
+        """
+        out = [x]
+        for freq in self.freq_bands:
+            for func in self.funcs:
+                out += [func(freq*x)]
+
+        return torch.cat(out, -1)
+    
 class LatentCode(nn.Module):
     def __init__(self,
                 D = 2, W = 128, in_channels_t = 1, out_channels_t = 64):
@@ -58,7 +96,126 @@ class LatentCode(nn.Module):
         return LatentCode
 
 '''Model'''
+
+''' Dense 3D grid
+'''
+class Grid_t(nn.Module):
+    def __init__(self, t_len, channels):
+        super(Grid_t, self).__init__()
+        self.channels = channels
+        self.t_len = t_len
+        self.grid = nn.Parameter(torch.zeros([t_len, channels]))
+
+    def forward(self, t):
+        out = self.grid[t.long()]
+        return out
 #
+class Plane_t(nn.Module):
+    def __init__(self, grid_config,
+        a: float = 0.1,
+        b: float = 0.5):
+        super(Plane_t, self).__init__()
+        self.grid_config = grid_config
+        
+        self.multiscale_res_multipliers = self.grid_config["multiscale_res"]
+        in_dim = self.grid_config["input_coordinate_dim"]
+        out_dim = self.grid_config["output_coordinate_dim"]
+        
+        self.concat_features = True
+        has_time_planes = in_dim == 4
+        coo_combs = [[0,3],[1,3],[2,3]]
+        # coo_combs = list(itertools.combinations(range(in_dim), grid_nd))
+        self.grid_nd = self.grid_config["grid_dimensions"]
+        self.grids = nn.ModuleList()
+        
+        for res in self.multiscale_res_multipliers:
+            config = self.grid_config.copy()
+            config["resolution"] = [
+            r * res for r in config["resolution"][:3]
+            ] + config["resolution"][3:]
+            reso = config["resolution"]
+            self.grid_coefs = nn.ParameterList()
+            for ci, coo_comb in enumerate(coo_combs):
+                
+                new_grid_coef = nn.Parameter(torch.empty(
+                    [1, out_dim] + [reso[cc] for cc in coo_comb[::-1]]
+                ))
+                if has_time_planes and 3 in coo_comb:  # Initialize time planes to 1
+                    nn.init.ones_(new_grid_coef)
+                else:
+                    nn.init.uniform_(new_grid_coef, a=a, b=b)
+                self.grid_coefs.append(new_grid_coef)
+            self.grids.append(self.grid_coefs)
+    def grid_sample_wrapper(self, grid: torch.Tensor, coords: torch.Tensor, align_corners: bool = True) -> torch.Tensor:
+        grid_dim = coords.shape[-1]
+
+        if grid.dim() == grid_dim + 1:
+            # no batch dimension present, need to add it
+            grid = grid.unsqueeze(0)
+        if coords.dim() == 2:
+            coords = coords.unsqueeze(0)
+
+        if grid_dim == 2 or grid_dim == 3:
+            grid_sampler = F.grid_sample
+        else:
+            raise NotImplementedError(f"Grid-sample was called with {grid_dim}D data but is only "
+                                    f"implemented for 2 and 3D data.")
+
+        coords = coords.view([coords.shape[0]] + [1] * (grid_dim - 1) + list(coords.shape[1:]))
+        B, feature_dim = grid.shape[:2]
+        n = coords.shape[-2]
+        interp = grid_sampler(
+            grid,  # [B, feature_dim, reso, ...]
+            coords,  # [B, 1, ..., n, grid_dim]
+            align_corners=align_corners,
+            mode='bilinear', padding_mode='border')
+        interp = interp.view(B, feature_dim, n).transpose(-1, -2)  # [B, n, feature_dim]
+        interp = interp.squeeze()  # [B?, n, feature_dim?]
+        return interp
+     
+    def interpolate_ms_features(self, pts: torch.Tensor,
+                                ms_grids: Collection[Iterable[nn.Module]],
+                                grid_dimensions: int,
+                                concat_features: bool,
+                                num_levels: Optional[int],
+                                ) -> torch.Tensor:
+        # coo_combs = list(itertools.combinations(
+        #     range(pts.shape[-1]), grid_dimensions)
+        # )
+        coo_combs = [[0,3],[1,3],[2,3]]
+        if num_levels is None:
+            num_levels = len(ms_grids)
+        multi_scale_interp = [] if concat_features else 0.
+        grid: nn.ParameterList
+        for scale_id, grid in enumerate(ms_grids[:num_levels]):
+            interp_space = 1.
+            for ci, coo_comb in enumerate(coo_combs):
+                # interpolate in plane
+                feature_dim = grid[ci].shape[1]  # shape of grid[ci]: 1, out_dim, *reso
+                interp_out_plane = (
+                    self.grid_sample_wrapper(grid[ci], pts[..., coo_comb])
+                    .view(-1, feature_dim)
+                )
+                # compute product over planes
+                interp_space = interp_space * interp_out_plane
+
+            # combine over scales
+            if concat_features:
+                multi_scale_interp.append(interp_space)
+            else:
+                multi_scale_interp = multi_scale_interp + interp_space
+
+        if concat_features:
+            multi_scale_interp = torch.cat(multi_scale_interp, dim=-1)
+        return multi_scale_interp
+    def forward(self, pts):
+        pts = pts.reshape(-1, pts.shape[-1])
+        features = self.interpolate_ms_features(
+            pts, ms_grids=self.grids,  # noqa
+            grid_dimensions=self.grid_nd,
+            concat_features=self.concat_features, num_levels=None)
+        return features
+    
 class DirectMPIGO(torch.nn.Module):    
     def __init__(self, xyz_min, xyz_max,
                  num_voxels=0, mpi_depth=0,
@@ -74,9 +231,29 @@ class DirectMPIGO(torch.nn.Module):
                  hidden_features=128, hidden_layers = 2, out_features=28,
                  use_fine = True,
                  use_sh = True,
-                 flag_video = True,
+                #  flag_video = True,
+                #  hash_t = False,
+                #  mlp_t = True,
+                #  plane_t = False,
+                #  flag_xyzt = False,
+                #  add_mlp = False,
+                 t_config = {
+                'flag_video': True,
+                'hash_t': False,     #对时间t使用mlp编码还是hash编码
+                'mlp_t': True,
+                'plane_t': False,
+                'flag_xyzt': False,
+                'add_mlp': True,
+                'mlp_pe': True,
+                },
+                 grid_config ={
+                            'grid_dimensions': 2,
+                            'input_coordinate_dim': 4,
+                            'output_coordinate_dim': 16,
+                            'resolution': [64, 64, 64, 150]
+                            },
                  viewbase_pe=4,
-                 savepath = '/data/liufengyi/Results/VoxGo_rewrite',
+                 savepath = '/data/liufengyi/Results/VoxGo_dynamic',
                  **kwargs):
         super(DirectMPIGO, self).__init__()
         #该组参数在模型训练时不会更新（即调用optimizer.step()后该组参数不会变化，只可人为地改变它们的值），但是该组参数又作为模型参数不可或缺的一部分
@@ -86,17 +263,54 @@ class DirectMPIGO(torch.nn.Module):
         self.savepath = savepath
         self.use_fine = use_fine
         self.use_sh = use_sh
-        self.flag_video = flag_video
+        self.t_config = t_config
+        
+        self.flag_video = self.t_config['flag_video']
+        self.hash_t = self.t_config['hash_t']
+        self.mlp_t = self.t_config['mlp_t']
+        self.plane_t = self.t_config['plane_t']
+        self.flag_xyzt = self.t_config['flag_xyzt']
+        self.add_mlp = self.t_config['add_mlp']
+        self.mlp_pe = self.t_config['mlp_pe']
+        
+        self.grid_config = grid_config
         self.ratio1 = []
         self.ratio2 = []
         self.ratio3 = []
         # determine init grid resolution    网格体素数量 空间大小  得到网格分辨率
         self._set_grid_resolution(num_voxels, mpi_depth) 
+        if self.add_mlp:
+            if self.mlp_pe:
+                self.embedding_xyzt = Embedding(4, 4)
+                self.embedding_xyz = Embedding(3, 10)
+                self.embedding_dir = Embedding(3, 4)
+                self.embedding_t = Embedding(1, 4)
+                in_channels_t = 4*4*2+4
+            else:
+                in_channels_t = 4
+            self.netmlp = LatentCode(D=3, W=128, in_channels_t=in_channels_t, out_channels_t=28)
+            print("netmlp structure: ", self.netmlp)
         if self.flag_video:   #视频合成，有时间t  先对时间t进行latent code
-            out_channels_t = 64
-            self.LatentCode = LatentCode(out_channels_t = out_channels_t)
-            hash_channel_ = hash_channel + out_channels_t
-            print("t-encoding structure: ", self.LatentCode)
+            if self.hash_t:
+                t_feature = 28
+                self.grid_t = Grid_t(30, t_feature)
+                hash_channel_ = hash_channel + t_feature
+                print("t-encoding structure: ", self.grid_t)
+            elif self.mlp_t:
+                out_channels_t = 64
+                in_c = 1
+                if self.flag_xyzt:
+                    in_c = 4
+                self.LatentCode = LatentCode(in_channels_t = in_c,out_channels_t = out_channels_t)
+                hash_channel_ = hash_channel + out_channels_t
+                print("t-encoding structure: ", self.LatentCode)
+            elif self.plane_t:
+                out_channels_t = 64
+                self.LatentCode = LatentCode(out_channels_t = out_channels_t)
+                # self.resolution = torch.cat((self.world_size, torch.tensor([150], dtype=torch.long)),dim=0)
+                self.gp = Plane_t(self.grid_config)
+                hash_channel_ = hash_channel + self.grid_config["output_coordinate_dim"]*len(self.grid_config["multiscale_res"]) + out_channels_t
+                print("plane model:", self.gp)
         else:
             hash_channel_ = hash_channel
         if self.use_fine:
@@ -295,7 +509,14 @@ class DirectMPIGO(torch.nn.Module):
             'hidden_layers' : self.hidden_layers,
             'out_features' : self.out_features,
             'use_sh' : self.use_sh,
-            'flag_video': self.flag_video,
+            # 'flag_video': self.flag_video,
+            # 'hash_t': self.hash_t,
+            # 'flag_xyzt': self.flag_xyzt,
+            # 'mlp_t': self.mlp_t,
+            # 'plane_t': self.plane_t,
+            'grid_config': self.grid_config,
+            't_config': self.t_config,
+            
             **self.rgbnet_kwargs,
         }
         else:
@@ -336,11 +557,37 @@ class DirectMPIGO(torch.nn.Module):
                 torch.linspace(self.xyz_min[2], self.xyz_max[2], self.world_size[2]),
             ), -1)
             if self.use_fine:
-                dens = self.mlpnet(self.hash.get_dense_grid().squeeze().permute(1,2,3,0).reshape(-1,self.hash_channel))[:,0].reshape(*self.world_size,-1).permute(3,0,1,2).unsqueeze(0) + self.act_shift.grid
-                self_alpha = F.max_pool3d(self.activate_density(dens), kernel_size=3, padding=1, stride=1)[0,0]
-                self.mask_cache = grid.MaskGrid(
-                        path=None, mask=self.mask_cache(self_grid_xyz) & (self_alpha>self.fast_color_thres),
-                        xyz_min=self.xyz_min, xyz_max=self.xyz_max)
+                if self.flag_video:
+                    if self.mlp_t:
+                        hash_feature = self.hash.get_dense_grid().squeeze().permute(1,2,3,0).reshape(-1,self.hash_channel)
+                        for i in range(30):
+                            image_t = torch.tensor((i/29.0)*2-1)
+                            latent_t = self.LatentCode(image_t.unsqueeze(-1))
+                            latent_t = latent_t.expand(hash_feature.shape[0], latent_t.shape[-1])
+                            hash_feature_ = torch.cat([hash_feature, latent_t], dim=-1)
+
+                            # dens_chunks = [
+                            #     {(self.mlpnet(hash_feature_)[:,0].reshape(*self.world_size,-1).permute(3,0,1,2).unsqueeze(0) + self.act_shift.grid).cpu()}
+                            #     for h_f in hash_feature_.split(81920, 0)
+                            # ]  
+                            dens = self.mlpnet(hash_feature_)[:,0].reshape(*self.world_size,-1).permute(3,0,1,2).unsqueeze(0) + self.act_shift.grid
+                            self_alpha = F.max_pool3d(self.activate_density(dens), kernel_size=3, padding=1, stride=1)[0,0]
+                            del dens
+                            if i == 0:
+                                self.mask_ = self_alpha>self.fast_color_thres
+                            else:
+                                self.mask_ += self_alpha>self.fast_color_thres
+                            del self_alpha
+                            del hash_feature_
+                        self.mask_cache = grid.MaskGrid(
+                                path=None, mask=self.mask_cache(self_grid_xyz) & self.mask_,
+                                xyz_min=self.xyz_min, xyz_max=self.xyz_max)                        
+                else:       
+                    dens = self.mlpnet(self.hash.get_dense_grid().squeeze().permute(1,2,3,0).reshape(-1,self.hash_channel))[:,0].reshape(*self.world_size,-1).permute(3,0,1,2).unsqueeze(0) + self.act_shift.grid
+                    self_alpha = F.max_pool3d(self.activate_density(dens), kernel_size=3, padding=1, stride=1)[0,0]
+                    self.mask_cache = grid.MaskGrid(
+                            path=None, mask=self.mask_cache(self_grid_xyz) & (self_alpha>self.fast_color_thres),
+                            xyz_min=self.xyz_min, xyz_max=self.xyz_max)
             else:
                 dens = self.density.get_dense_grid() + self.act_shift.grid
                 self_alpha = F.max_pool3d(self.activate_density(dens), kernel_size=3, padding=1, stride=1)[0,0]
@@ -405,7 +652,7 @@ class DirectMPIGO(torch.nn.Module):
         shape = density.shape
         return Raw2Alpha.apply(density.flatten(), 0, interval).reshape(shape)
 
-    def sample_ray(self, rays_o, rays_d, near, far, stepsize, latent_t=None, **render_kwargs):
+    def sample_ray(self, rays_o, rays_d, near, far, stepsize, latent_t=None, latent_t1=None,**render_kwargs):
         '''Sample query points on rays.
         All the output points are sorted from near to far.
         Input:
@@ -425,6 +672,9 @@ class DirectMPIGO(torch.nn.Module):
             rays_o, rays_d, self.xyz_min, self.xyz_max, N_samples)
         mask_inbbox = ~mask_outbbox
         if self.flag_video:
+            if latent_t1 != None:
+                latent_t1 = latent_t1.unsqueeze(1).expand(latent_t1.shape[0],ray_pts.shape[1],latent_t1.shape[1])
+                latent_t1 = latent_t1[mask_inbbox]
             latent_t = latent_t.unsqueeze(1).expand(latent_t.shape[0],ray_pts.shape[1],latent_t.shape[1])
             latent_t = latent_t[mask_inbbox]
         ray_pts = ray_pts[mask_inbbox]
@@ -434,10 +684,16 @@ class DirectMPIGO(torch.nn.Module):
             ray_id = torch.arange(mask_inbbox.shape[0]).view(-1,1).expand_as(mask_inbbox)[mask_inbbox]
             step_id = torch.arange(mask_inbbox.shape[1]).view(1,-1).expand_as(mask_inbbox)[mask_inbbox]
         if self.flag_video:    
-            return ray_pts, ray_id, step_id, N_samples, latent_t
+            return ray_pts, ray_id, step_id, N_samples, latent_t, latent_t1
+            # if latent_t1 != None:
+            #     return ray_pts, ray_id, step_id, N_samples, latent_t, latent_t1
+            # else:
+            #     return ray_pts, ray_id, step_id, N_samples, latent_t
         else:
             return ray_pts, ray_id, step_id, N_samples
-
+    def normalize_aabb(self, pts, aabb):
+        return (pts - aabb[0]) * (2.0 / (aabb[1] - aabb[0])) - 1.0
+    
     def forward(self, rays_o, rays_d, viewdirs, global_step=None, image_t=None, **render_kwargs):
         '''Volume rendering
         @rays_o:   [N, 3] the starting point of the N shooting rays.
@@ -448,9 +704,25 @@ class DirectMPIGO(torch.nn.Module):
         ret_dict = {}
         N = len(rays_o)
         if self.flag_video:
-            latent_t = self.LatentCode(image_t.unsqueeze(-1))
-            ray_pts, ray_id, step_id, N_samples, latent_t = self.sample_ray(
-                rays_o=rays_o, rays_d=rays_d, latent_t=latent_t, **render_kwargs)
+            if self.mlp_t:
+                latent_t1 = None
+                if self.flag_xyzt:
+                    latent_t = image_t.unsqueeze(-1)
+                else:    
+                    latent_t = self.LatentCode(image_t.unsqueeze(-1))
+                if self.mlp_pe:
+                    latent_t1 = image_t.unsqueeze(-1)
+            elif self.hash_t:
+                latent_t = self.grid_t(image_t)
+            elif self.plane_t:
+                latent_t1 = self.LatentCode(image_t.unsqueeze(-1))
+                latent_t = image_t.unsqueeze(-1)
+            ray_pts, ray_id, step_id, N_samples, latent_t, latent_t1 = self.sample_ray(
+                rays_o=rays_o, rays_d=rays_d, latent_t=latent_t, latent_t1=latent_t1,**render_kwargs)
+            if self.flag_xyzt:
+                latent_t = self.LatentCode(torch.cat([ray_pts, latent_t], dim=-1))
+            if self.mlp_pe:
+                self.netmlp_input = self.embedding_xyzt(torch.cat([ray_pts, latent_t1], dim=-1))
         else:    
             # sample points on rays
             ray_pts, ray_id, step_id, N_samples = self.sample_ray(
@@ -464,16 +736,25 @@ class DirectMPIGO(torch.nn.Module):
             ray_id = ray_id[mask]
             step_id = step_id[mask]
             if self.flag_video:
-                latent_t = latent_t[mask]     
+                latent_t = latent_t[mask]    
+                if self.mlp_pe:
+                    latent_t1 = latent_t1[mask]
+                # latent_t1 = latent_t1[mask]   
                     
         if self.use_fine:
             #hashmlp
             mlp_grid = self.hash(ray_pts)
             if self.flag_video:
-                mlp_grid = torch.cat([mlp_grid, latent_t], dim=-1)
+                if self.plane_t:
+                    feature = self.gp(torch.cat([self.normalize_aabb(ray_pts, [self.xyz_min, self.xyz_max]), latent_t], dim=-1))
+                    mlp_grid = torch.cat([mlp_grid, feature, latent_t1], dim=-1)
+                else:
+                    mlp_grid = torch.cat([mlp_grid, latent_t], dim=-1)
+                if self.add_mlp:
+                    mlp_features_ = self.netmlp(self.netmlp_input)
             mlp_features = self.mlpnet(mlp_grid)
-            density = mlp_features[:,0] + self.act_shift(ray_pts)
-            sh_val = mlp_features[:,1:]
+            density = mlp_features[:,0] + self.act_shift(ray_pts) + mlp_features_[:,0]
+            sh_val = mlp_features[:,1:] + mlp_features_[:,1:]
             alpha = self.activate_density(density, interval)
             
             if self.fast_color_thres > 0:  #yes

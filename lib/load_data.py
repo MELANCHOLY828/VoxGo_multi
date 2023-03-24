@@ -10,8 +10,8 @@ from .load_co3d import load_co3d_data
 from .load_nerfpp import load_nerfpp_data
 from .load_facebook import load_facebook_data
 from .load_facevideo import load_facevideo_data
-
-def load_data(args):
+from .intrinsics import Intrinsics
+def load_data(args, multi=0):
 
     K, depths = None, None
     near_clip = None
@@ -85,8 +85,9 @@ def load_data(args):
         print('NEAR FAR', near, far)
         
     elif args.dataset_type == 'facevideo':
-        images, depths, poses, bds, render_poses, i_test = load_facevideo_data(
-                args.datadir, args.factor, args.width, args.height,
+        images, depths, poses, bds, render_poses, i_test, flame1 = load_facevideo_data(
+                multi, args.flag_multi,
+                args.datadir, args.factor[multi],
                 recenter=True, bd_factor=args.bd_factor,
                 spherify=args.spherify,
                 load_depths=args.load_depths,
@@ -234,6 +235,7 @@ def load_data(args):
         poses=poses, render_poses=render_poses,
         images=images, depths=depths,
         irregular_shape=irregular_shape,
+        flame1=flame1,
     )
     return data_dict
 
